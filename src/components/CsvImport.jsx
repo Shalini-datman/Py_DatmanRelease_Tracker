@@ -1,18 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { B,FONT,FONT_DISPLAY,PRIORITIES,MODULES,RELEASE_TYPES,STATUSES,GATEWAY_MODULES,APP_MODULES,APPROVER_NAMES,STATUS_COLORS,PRIORITY_COLORS,TYPE_COLORS,TYPE_COLOR,inputStyle,primaryBtn,tdSt,parseDDMMYYYY,daysBetween,leadTimeDays,fmtDate,Chip,StatusBadge,Field,SectionLabel,LogoMark,CalendarPicker,getApprovedNames,isApproved } from "./shared.jsx";
-function isApproved(val){
-  if(val===null||val===undefined) return false;
-  return String(val).trim().toLowerCase()==="approved";
-}
-
-// getApprovedNames: returns all approver names (known + dynamic) who approved
-function getApprovedNames(r){
-  if(!r||!r.approvals||typeof r.approvals!=="object"||Array.isArray(r.approvals)) return [];
-  // Merge known names + any dynamic names present in this record
-  const allNames=[...new Set([...APPROVER_NAMES,...Object.keys(r.approvals)])];
-  return allNames.filter(n=>r.approvals[n]===true);
-}
-
 // matchApproverHeader: matches known approver names AND auto-detects unknown ones.
 // Returns index into APPROVER_NAMES for known names, or a synthetic entry for new ones.
 // For unknown "Firstname's Approval" headers, returns the first name capitalised.
