@@ -118,6 +118,15 @@ export function LogoMark({size=32}){
 }
 
 // ─── Mini Calendar Picker ─────────────────────────────────────────────────────
+export function isApproved(val){
+  if(val===null||val===undefined) return false;
+  return String(val).trim().toLowerCase()==="approved";
+}
+export function getApprovedNames(r){
+  if(!r||!r.approvals||typeof r.approvals!=="object"||Array.isArray(r.approvals)) return [];
+  const allNames=[...new Set([...APPROVER_NAMES,...Object.keys(r.approvals)])];
+  return allNames.filter(n=>r.approvals[n]===true);
+}
 export function CalendarPicker({value,onChange,onClose}){
   // value = {from:"YYYY-MM-DD", to:"YYYY-MM-DD"} | null
   const today=new Date("2026-03-25");
