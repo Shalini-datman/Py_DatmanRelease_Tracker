@@ -373,6 +373,7 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
             </table>
           </div>
         </div>
+      </div>
       <PaginationBar current={jiraPage} total={jiraTotalPages} onChange={setJiraPage} count={rows.length} label="releases" />
     </div>
   );
