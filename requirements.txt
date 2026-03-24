@@ -1,0 +1,5 @@
+# No external packages needed — all Python stdlib
+# urllib, json, csv, base64, datetime, collections are all built-in
+# Supabase is accessed via plain HTTP REST calls
+# If you want to add pandas later for heavy CSV processing:
+# pandas==2.2.0

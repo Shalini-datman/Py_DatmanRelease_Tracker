@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/api/jira/:path*", "destination": "/api/jira" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
