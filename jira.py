@@ -1,8 +1,8 @@
 """
 Jira API Proxy — /api/jira/*
-Forwards requests to Jira REST API v3 with server-side credentials.
+Forwards all requests to Jira/Confluence REST APIs with server-side credentials.
 
-Env vars (set in Vercel dashboard):
+Env vars (Vercel dashboard):
   JIRA_BASE_URL   = https://datman.atlassian.net
   JIRA_EMAIL      = admin@datman.com
   JIRA_API_TOKEN  = your-api-token
@@ -33,30 +33,31 @@ def jira_request(method: str, path: str, raw_body: bytes = None):
     url = f"{JIRA_BASE}/{path.lstrip('/')}"
     req = urllib.request.Request(
         url,
-        data=raw_body,          # send raw bytes — no re-serialisation
+        data=raw_body,
         method=method,
         headers={
             "Authorization": _auth_header(),
             "Content-Type":  "application/json",
             "Accept":        "application/json",
+            "X-Atlassian-Token": "no-check",
         },
     )
     try:
         with urllib.request.urlopen(req) as res:
-            return res.status, json.loads(res.read() or b"{}")
+            body = res.read()
+            try:    return res.status, json.loads(body) if body else {}
+            except: return res.status, {"raw": body.decode("utf-8", "replace")}
     except urllib.error.HTTPError as e:
-        try:
-            err_body = json.loads(e.read() or b"{}")
-        except Exception:
-            err_body = {"error": str(e)}
-        return e.code, err_body
+        body = e.read()
+        try:    return e.code, json.loads(body) if body else {}
+        except: return e.code, {"error": body.decode("utf-8", "replace")}
 
 
 class handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin",  "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type,Accept")
 
     def _json(self, code, payload):
@@ -68,43 +69,45 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _raw_body(self) -> bytes:
-        """Read raw request body — works even when Content-Length is missing."""
         length = self.headers.get("Content-Length")
         if length:
             return self.rfile.read(int(length))
-        # Chunked or unknown length — read until EOF
         chunks = []
         while True:
             chunk = self.rfile.read(4096)
-            if not chunk:
-                break
+            if not chunk: break
             chunks.append(chunk)
         return b"".join(chunks)
 
     def _jira_path(self) -> str:
-        from urllib.parse import urlparse
-        raw = urlparse(self.path).path
-        return re.sub(r"^/api/jira/?", "", raw)
+        from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+        parsed = urlparse(self.path)
+        path   = re.sub(r"^/api/jira/?", "", parsed.path)
+        # Preserve query string
+        if parsed.query:
+            return f"{path}?{parsed.query}"
+        return path
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors()
-        self.end_headers()
+        self.send_response(204); self._cors(); self.end_headers()
 
     def do_GET(self):
         status, data = jira_request("GET", self._jira_path())
         self._json(status, data)
 
     def do_POST(self):
-        raw = self._raw_body()
-        # Log body for debugging — visible in Vercel function logs
-        print(f"[jira.py] POST {self._jira_path()} body={raw.decode('utf-8','replace')[:500]}")
+        raw    = self._raw_body()
         status, data = jira_request("POST", self._jira_path(), raw or None)
         self._json(status, data)
 
     def do_PUT(self):
-        raw = self._raw_body()
+        raw    = self._raw_body()
         status, data = jira_request("PUT", self._jira_path(), raw or None)
+        self._json(status, data)
+
+    def do_PATCH(self):
+        raw    = self._raw_body()
+        status, data = jira_request("PATCH", self._jira_path(), raw or None)
         self._json(status, data)
 
     def log_message(self, *_): pass
