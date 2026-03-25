@@ -300,7 +300,9 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       onSyncBack({ ...r, jiraLink, jiraLinks: [jiraLink, ...(r.jiraLinks || []).filter(l => l !== jiraLink)] });
 
     } catch (err) {
-      setSync(r.id, { status: "err", msg: err.message });
+      const msg = err.message || String(err);
+      console.error("SYNC ERROR:", msg);
+      setSync(r.id, { status: "err", msg });
     }
   }, [cfg, onSyncBack]);
 
@@ -416,6 +418,36 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         </div>
       )}
 
+      {/* ── Debug test panel ── */}
+      {showCfg && (
+        <div style={{ margin: "0.5rem 2rem 0", background: "#0a0a0a", border: "1px solid #333", borderRadius: 10, padding: "0.75rem 1rem", display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ color: "#4a7a96", fontSize: "0.7rem", fontWeight: 700 }}>TEST JIRA CONNECTION:</span>
+          <button onClick={async () => {
+            try {
+              const res  = await jiraFetch(`rest/api/3/project/${cfg.key}`);
+              const data = await res.json();
+              alert(`Project fetch: HTTP ${res.status}\n${JSON.stringify(data, null, 2).slice(0,400)}`);
+            } catch(e) { alert("Error: " + e.message); }
+          }} style={{ height: 24, padding: "0 0.75rem", background: "#0d3320", border: "1px solid #22c55e44", color: "#22c55e", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.7rem", fontWeight: 700 }}>
+            1. Test Project Fetch
+          </button>
+          <button onClick={async () => {
+            try {
+              const res  = await jiraFetch(`rest/api/3/project/${cfg.key}`);
+              const proj = await res.json();
+              const projIdInt = parseInt(proj.id, 10);
+              const minimal = { name: `TEST_${Date.now()}`, projectId: projIdInt };
+              alert(`About to POST:\n${JSON.stringify(minimal, null, 2)}\n\nprojectId type: ${typeof projIdInt}`);
+              const res2 = await jiraFetch(`rest/api/3/version`, { method: "POST", body: JSON.stringify(minimal) });
+              const txt  = await res2.text();
+              alert(`Version create: HTTP ${res2.status}\n${txt.slice(0,500)}`);
+            } catch(e) { alert("Error: " + e.message); }
+          }} style={{ height: 24, padding: "0 0.75rem", background: "#0f2d52", border: "1px solid #60a5fa44", color: "#60a5fa", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.7rem", fontWeight: 700 }}>
+            2. Test Minimal Version Create
+          </button>
+        </div>
+      )}
+
       {/* ── Table ── */}
       <div style={{ padding: "1rem 2rem 1.5rem" }}>
         <div style={{ background: B.bgCard, border: `1px solid ${B.border}`, borderRadius: 12, overflow: "hidden" }}>
@@ -474,7 +506,10 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
                         {ss?.status === "loading"
                           ? <span style={{ color: B.teal, fontSize: "0.7rem" }}>⏳…</span>
                           : ss?.status === "err"
-                          ? <span style={{ color: "#ef4444", fontSize: "0.65rem" }} title={ss.msg}>✗ Error</span>
+                          ? <div style={{ color: "#ef4444", fontSize: "0.65rem" }}>
+                              <div style={{ fontWeight: 700 }}>✗ Failed</div>
+                              <div style={{ color: "#fca5a5", fontSize: "0.6rem", maxWidth: 200, whiteSpace: "pre-wrap", wordBreak: "break-all", marginTop: 2 }}>{ss.msg}</div>
+                            </div>
                           : (jiraHref && jiraHref !== "Not needed")
                           ? <a href={jiraHref} target="_blank" rel="noreferrer"
                               style={{ ...BTN({ background: "#0f2d5288", color: "#60a5fa", border: "1px solid #1e4a8066", height: 24, padding: "0 0.55rem", textDecoration: "none", fontSize: "0.7rem" }) }}>
