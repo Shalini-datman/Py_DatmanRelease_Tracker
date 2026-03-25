@@ -225,18 +225,19 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         if (startDate)   payload.startDate   = startDate;
         if (vDesc)       payload.description = vDesc.slice(0, 255);
 
-        // Log to browser console so we can see exact payload
-        console.log("JIRA PAYLOAD →", JSON.stringify(payload));
+        const payloadStr = JSON.stringify(payload);
 
         const createRes = await jiraFetch(`rest/api/3/version`, {
-          method: "POST", body: JSON.stringify(payload)
+          method: "POST", body: payloadStr
         });
+        const responseText = await createRes.text().catch(() => "");
         if (!createRes.ok) {
-          const errBody = await createRes.text().catch(() => "");
-          console.error("JIRA ERROR ←", errBody);
-          throw new Error(`Jira ${createRes.status}: ${errBody}`);
+          // Full payload + response shown in UI so we can diagnose
+          throw new Error(
+            `HTTP ${createRes.status}\n\nSENT:\n${payloadStr}\n\nJIRA SAID:\n${responseText}`
+          );
         }
-        const ver = await createRes.json();
+        const ver = JSON.parse(responseText);
         versionId = ver.id;
         jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
         setSync(r.id, { status: "loading", msg: `Version created — adding RN links…` });
