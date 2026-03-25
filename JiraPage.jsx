@@ -185,9 +185,9 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         return r.type || "NF";
       })();
 
-      // Final format: 2026[Gateway Imp - Adyen 3DS Report Breakdown] - RN-GAT-067
+      // Final format: 2026 (Gateway Imp - Adyen 3DS Report Breakdown) - RN-GAT-067
       const rnSuffix = r.rn ? ` - ${r.rn}` : "";
-      const vName    = `${releaseYear}[${teamLabel} ${typeAbbr} - ${r.summary}]${rnSuffix}`.slice(0, 255);
+      const vName    = `${releaseYear} (${teamLabel} ${typeAbbr} - ${r.summary})${rnSuffix}`.slice(0, 255);
       const vDesc    = [r.rn, r.goal].filter(Boolean).join(" · ");
       const jiraBase = cfg.base ? cfg.base.replace(/\/$/, "") : "https://datman.atlassian.net";
       const listRes  = await jiraFetch(`rest/api/3/project/${cfg.key}/versions`);
@@ -243,7 +243,7 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         });
         if (!createRes.ok) {
           const txt = await createRes.text();
-          throw new Error(`Create version failed (${createRes.status}):\n${txt}`);
+          throw new Error(`Create version failed (${createRes.status}): ${txt}`);
         }
         const ver = await createRes.json();
         versionId = ver.id;
