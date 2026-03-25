@@ -179,8 +179,22 @@ export default function EditModal({release, onSave, onClose}){
             <Field label="Services">
               <input value={form.dora?.services||""} onChange={e=>setDora("services",e.target.value)} style={inputStyle}/>
             </Field>
-            <Field label="Handover Date (dd/mm/yyyy)" highlight={empty(form.dora?.handoverDate)}>
-              <input value={form.dora?.handoverDate||""} onChange={e=>setDora("handoverDate",e.target.value)} placeholder="13/03/2026" style={{...inputStyle,borderColor:empty(form.dora?.handoverDate)?B.teal+"88":B.border2}}/>
+            <Field label="Handover Date" highlight={empty(form.dora?.handoverDate)}>
+              <input type="date"
+                value={(()=>{
+                  const v=form.dora?.handoverDate||"";
+                  // Convert DD/MM/YYYY → YYYY-MM-DD for the date input
+                  if(/^\d{2}\/\d{2}\/\d{4}$/.test(v)){const[d,m,y]=v.split("/");return`${y}-${m}-${d}`;}
+                  return v;
+                })()}
+                onChange={e=>{
+                  const v=e.target.value; // YYYY-MM-DD from browser
+                  if(/^\d{4}-\d{2}-\d{2}$/.test(v)){
+                    const[y,m,d]=v.split("-");
+                    setDora("handoverDate",`${d}/${m}/${y}`); // store as DD/MM/YYYY
+                  } else { setDora("handoverDate",v); }
+                }}
+                style={{...inputStyle,colorScheme:"dark",borderColor:empty(form.dora?.handoverDate)?B.teal+"88":B.border2}}/>
             </Field>
           </div>
           {form.dora?.handoverDate&&form.releaseActual&&(()=>{

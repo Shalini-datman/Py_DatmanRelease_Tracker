@@ -43,6 +43,17 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
   const [draftCfg, setDraftCfg] = useState(cfg);
   const configured = !!(cfg.base && cfg.key);
 
+  // Auto-load base URL from Vercel env vars on first mount if not already saved
+  useEffect(() => {
+    if (cfg.base) return; // already configured
+    fetch("/api/jira_config").then(r => r.json()).then(data => {
+      if (data.base) {
+        const updated = { ...cfg, base: data.base };
+        setCfg(updated); setDraftCfg(updated); saveJiraCfg(updated);
+      }
+    }).catch(() => {});
+  }, []);
+
   const saveCfg = () => { saveJiraCfg(draftCfg); setCfg(draftCfg); setShowCfg(false); };
 
   // ── Filters ─────────────────────────────────────────────────────────────────
@@ -115,6 +126,16 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
   };
 
   const syncToJira = useCallback(async (r) => {
+    if (!cfg.key) {
+      setSync(r.id, { status: "err", msg: "Project Key not set — click ⚙ Setup Jira and enter your Jira project key (e.g. DN)" });
+      setShowCfg(true);
+      return;
+    }
+    if (!cfg.base) {
+      setSync(r.id, { status: "err", msg: "Jira Base URL not set — click ⚙ Setup Jira" });
+      setShowCfg(true);
+      return;
+    }
     setSync(r.id, { status: "loading", msg: "Connecting to Jira…" });
     try {
       // Step 1 — Fetch project to get numeric ID
@@ -127,27 +148,66 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       const proj = await projRes.json();
 
       // Step 2 — Check if version already exists (avoid duplicates)
+      // Version NAME format: 2026[Gateway - Adyen 3DS Report Breakdown] - RN-GAT-067
       setSync(r.id, { status: "loading", msg: "Checking for existing version…" });
-      const vName = r.rn || r.summary.slice(0, 100);
-      const listRes = await jiraFetch(`rest/api/3/project/${cfg.key}/versions`);
-      const existing = listRes.ok ? await listRes.json() : [];
-      const found = (Array.isArray(existing) ? existing : []).find(v => v.name === vName);
-      let versionId, jiraLink;
+
+      // Determine team label from modules
+      const gwMods  = ["Payments","Payouts","General"];
+      const appMods = ["App","Portal","Web"];
+      const mods    = r.modules || [];
+      const isGW    = mods.some(m => gwMods.includes(m));
+      const isApp   = mods.some(m => appMods.some(am => m === am));
+      // Pick the most specific module label: Portal, App, Web, Gateway, or first module
+      const teamLabel = (() => {
+        if (mods.includes("Portal"))   return "Portal";
+        if (mods.includes("App"))      return "App";
+        if (mods.includes("Web"))      return "Web";
+        if (isGW)                      return "Gateway";
+        if (mods.length)               return mods[0];
+        return "Release";
+      })();
+
+      // Year from release actual or planned date
+      const releaseYear = (() => {
+        const d = r.releaseActual || r.releasePlanned;
+        if (!d) return new Date().getFullYear();
+        const dt = new Date(d);
+        return isNaN(dt) ? new Date().getFullYear() : dt.getFullYear();
+      })();
+
+      // Type abbreviation: Improvement→Imp, Bug→BF, New Feature→NF, Patch→Patch
+      const typeAbbr = (() => {
+        const t = (r.type || "").toLowerCase();
+        if (t === "improvement")  return "Imp";
+        if (t === "bug")          return "BF";
+        if (t === "new feature")  return "NF";
+        if (t === "patch")        return "Patch";
+        return r.type || "NF";
+      })();
+
+      // Final format: 2026[Gateway Imp - Adyen 3DS Report Breakdown] - RN-GAT-067
+      const rnSuffix = r.rn ? ` - ${r.rn}` : "";
+      const vName    = `${releaseYear}[${teamLabel} ${typeAbbr} - ${r.summary}]${rnSuffix}`.slice(0, 255);
+      const vDesc    = [r.rn, r.goal].filter(Boolean).join(" · ");
       const jiraBase = cfg.base ? cfg.base.replace(/\/$/, "") : "https://datman.atlassian.net";
+      const listRes  = await jiraFetch(`rest/api/3/project/${cfg.key}/versions`);
+      const existing = listRes.ok ? await listRes.json() : [];
+      const found    = (Array.isArray(existing) ? existing : []).find(v => v.name === vName);
+      let versionId, jiraLink;
 
       if (found) {
         versionId = found.id;
-        jiraLink = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
-        setSync(r.id, { status: "ok", msg: `Already exists in Jira (ID ${versionId})`, link: jiraLink, versionId });
+        jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
+        setSync(r.id, { status: "loading", msg: `Version exists (ID ${versionId}), adding related work…` });
       } else {
-        // Step 3 — Create new version
-        setSync(r.id, { status: "loading", msg: "Creating Jira version entry…" });
+        // Step 3 — Create new Fix Version
+        setSync(r.id, { status: "loading", msg: "Creating Jira Fix Version…" });
         const payload = {
-          name: vName,
-          description: [r.goal, r.summary].filter(Boolean).join(" · ").slice(0, 255),
-          projectId: proj.id,
-          released: true,
-          startDate: r.releasePlanned || undefined,
+          name:        vName,
+          description: vDesc,
+          projectId:   proj.id,
+          released:    r.status === "Released",
+          startDate:   r.releasePlanned || undefined,
           releaseDate: r.releaseActual || r.releasePlanned || undefined,
         };
         const createRes = await jiraFetch(`rest/api/3/version`, {
@@ -159,11 +219,64 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         }
         const ver = await createRes.json();
         versionId = ver.id;
-        jiraLink = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
-        setSync(r.id, { status: "ok", msg: `✓ Created "${ver.name}" (ID ${versionId})`, link: jiraLink, versionId });
+        jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
+        setSync(r.id, { status: "loading", msg: `✓ Version created — adding related work…` });
       }
 
-      // Step 4 — Sync link back into table
+      // Step 4 — Add RN links as "related work" items (Development category)
+      // This fills in the "Add related work" section shown in the Jira release page
+      const rnLinks = [...new Set([
+        ...(r.rnLinks || []),
+        ...(r.rnLink ? [r.rnLink] : []),
+      ])].filter(Boolean);
+
+      if (rnLinks.length > 0) {
+        setSync(r.id, { status: "loading", msg: `Adding ${rnLinks.length} RN link(s) as related work…` });
+        for (const [idx, lnk] of rnLinks.entries()) {
+          const remotePayload = {
+            url:         lnk,
+            title:       idx === 0 ? r.summary : `${r.summary} (${idx + 1})`,
+            summary:     r.summary,
+            relationship: "Development",
+            object: {
+              url:     lnk,
+              title:   idx === 0 ? (r.rn || r.summary) : `${r.rn || r.summary} (${idx + 1})`,
+              summary: r.summary,
+              icon: {
+                url16x16: "https://www.atlassian.com/favicon.ico",
+                title:    "Release Note",
+              },
+              status: {
+                resolved: r.status === "Released",
+                icon: { url16x16: "", title: r.status, link: "" },
+              },
+            },
+            application: {
+              type:    "com.atlassian.confluence",
+              name:    "Release Notes",
+            },
+          };
+          // Jira remote version links endpoint
+          const remRes = await jiraFetch(
+            `rest/api/3/version/${versionId}/remotelink`,
+            { method: "POST", body: JSON.stringify(remotePayload) }
+          );
+          // 200/201 = success, 404 = endpoint may not exist on this Jira tier — not fatal
+          if (!remRes.ok && remRes.status !== 404) {
+            const txt = await remRes.text().catch(() => "");
+            console.warn(`Remote link ${idx + 1} failed (${remRes.status}): ${txt}`);
+          }
+        }
+      }
+
+      const addedLinks = rnLinks.length;
+      setSync(r.id, {
+        status: "ok",
+        msg: `✓ "${vName}" synced${addedLinks ? ` + ${addedLinks} RN link${addedLinks > 1 ? "s" : ""} added` : ""}`,
+        link: jiraLink, versionId,
+      });
+
+      // Step 5 — Sync Jira link back into release record
       onSyncBack({ ...r, jiraLink, jiraLinks: [jiraLink, ...(r.jiraLinks || []).filter(l => l !== jiraLink)] });
 
     } catch (err) {

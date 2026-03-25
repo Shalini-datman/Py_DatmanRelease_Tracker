@@ -117,40 +117,55 @@ export default function TableView({releases,onAdd,onImport,onEdit,teamFilter,tab
     : statusFilter==="Rolledback" ? searchFiltered.filter(r=>r.status==="Cancelled")
     : searchFiltered.filter(r=>r.status!=="Released"&&r.status!=="Cancelled"); // Pending — excludes Rolledback/Cancelled
 
-  // Split into Released/active and Planning/pending
-  const releasedRows=statusFiltered
-    .filter(r=>r.status==="Released"||r.status==="Cancelled")
-    .sort((a,b)=>{
-      // Primary: date descending
-      const da=getVal(a,"releaseActual")||getVal(a,"releasePlanned");
-      const db=getVal(b,"releaseActual")||getVal(b,"releasePlanned");
-      if(da!==db) return da>db?-1:1;
-      // Secondary: RN number
-      const ra=parseInt((a.rn||"").replace(/\D/g,""))||0;
-      const rb=parseInt((b.rn||"").replace(/\D/g,""))||0;
-      return rb-ra;
-    });
-  const pendingRows=statusFiltered
-    .filter(r=>r.status!=="Released"&&r.status!=="Cancelled")
-    .sort((a,b)=>{
-      const sa=STATUS_ORDER[a.status]??3, sb=STATUS_ORDER[b.status]??3;
-      if(sa!==sb) return sa-sb;
-      const da=getVal(a,"releasePlanned")||getVal(a,"releaseActual");
-      const db=getVal(b,"releasePlanned")||getVal(b,"releaseActual");
-      // Ascending by planned date (soonest first)
-      if(da!==db) return da<db?-1:1;
+  // ── Default sort: date DESC, then RN DESC within same date ─────────────────
+  const defaultSortReleased = (a, b) => {
+    const da = getVal(a,"releaseActual") || getVal(a,"releasePlanned") || "";
+    const db = getVal(b,"releaseActual") || getVal(b,"releasePlanned") || "";
+    if (da !== db) return da > db ? -1 : 1;
+    // Same date — sort by RN number DESC (higher RN = newer)
+    const rnNum = rn => {
+      const m = (rn||"").match(/RN-[A-Z]+-(\d+)/);
+      return m ? parseInt(m[1]) : 0;
+    };
+    return rnNum(b.rn) - rnNum(a.rn);
+  };
+  const defaultSortPending = (a, b) => {
+    const sa = STATUS_ORDER[a.status] ?? 3, sb = STATUS_ORDER[b.status] ?? 3;
+    if (sa !== sb) return sa - sb;
+    const da = getVal(a,"releasePlanned") || getVal(a,"releaseActual") || "";
+    const db = getVal(b,"releasePlanned") || getVal(b,"releaseActual") || "";
+    return da < db ? -1 : da > db ? 1 : 0;
+  };
+
+  // ── Column sort (click on header) ────────────────────────────────────────────
+  const applyColSort = (rows, defaultSort) => {
+    if (!sort.key) return [...rows].sort(defaultSort);
+    return [...rows].sort((a, b) => {
+      // RN column — sort by team prefix first (GAT vs APP), then number
+      if (sort.key === "rn") {
+        const pa = (a.rn||"").slice(0,6), pb = (b.rn||"").slice(0,6);
+        if (pa !== pb) return pa < pb ? -sort.dir : sort.dir;
+        const na = parseInt((a.rn||"").replace(/\D/g,"")) || 0;
+        const nb = parseInt((b.rn||"").replace(/\D/g,"")) || 0;
+        return (na - nb) * sort.dir;
+      }
+      const va = getVal(a, sort.key), vb = getVal(b, sort.key);
+      if (!va && !vb) return 0;
+      if (!va) return 1;
+      if (!vb) return -1;
+      // Numeric sort for dates (YYYY-MM-DD compares correctly as strings)
+      if (va < vb) return -sort.dir;
+      if (va > vb) return  sort.dir;
       return 0;
     });
-  // For column-click sort, apply on top of the above groups
-  const applyColSort=(rows)=>{
-    if(!sort.key) return rows;
-    return [...rows].sort((a,b)=>{
-      const va=getVal(a,sort.key), vb=getVal(b,sort.key);
-      if(!va&&!vb) return 0; if(!va) return 1; if(!vb) return -1;
-      return va<vb?-sort.dir:va>vb?sort.dir:0;
-    });
   };
-  const sorted=[...applyColSort(releasedRows),...applyColSort(pendingRows)];
+
+  const releasedRows = statusFiltered.filter(r => r.status === "Released" || r.status === "Cancelled");
+  const pendingRows  = statusFiltered.filter(r => r.status !== "Released" && r.status !== "Cancelled");
+  const sorted = [
+    ...applyColSort(releasedRows, defaultSortReleased),
+    ...applyColSort(pendingRows,  defaultSortPending),
+  ];
   const releasedCount=releasedRows.length;
   const pendingCount=pendingRows.length;
 

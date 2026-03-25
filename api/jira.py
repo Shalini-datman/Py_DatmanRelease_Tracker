@@ -84,4 +84,10 @@ class handler(BaseHTTPRequestHandler):
         status, data = jira_request("POST", path, body)
         self._json(status, data)
 
+    def do_PUT(self):
+        path = self._jira_path()
+        body = self._body()
+        status, data = jira_request("PUT", path, body)
+        self._json(status, data)
+
     def log_message(self, *_): pass
