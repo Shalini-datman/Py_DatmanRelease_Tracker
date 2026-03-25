@@ -190,7 +190,7 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
 
       // Version name — NO square brackets (Jira rejects them)
       const rnSuffix = r.rn ? ` - ${r.rn}` : "";
-      const vName    = `${releaseYear} (${teamLabel} ${typeAbbr} - ${r.summary})${rnSuffix}`.slice(0, 255);
+      const vName    = `${releaseYear}_${teamLabel} ${typeAbbr} - ${r.summary}${rnSuffix}`.slice(0, 255);
       const vDesc    = [r.rn, r.goal].filter(Boolean).join(" - ");
       const jiraBase = (cfg.base || "https://datman.atlassian.net").replace(/\/$/, "");
 
@@ -212,23 +212,29 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         const startDate   = toYMD(r.releasePlanned);
         const releaseDate = toYMD(r.releaseActual) || toYMD(r.releasePlanned);
 
-        // STRICT payload — only fields Jira v3 accepts, types must be exact
+        // Minimal payload — only the two required fields first
+        // to isolate whether name or dates are the issue
+        const projIdInt = parseInt(proj.id, 10);
+        if (isNaN(projIdInt)) throw new Error(`Project ID "${proj.id}" is not a number`);
+
         const payload = {
-          name:      vName,                 // string
-          projectId: parseInt(proj.id, 10), // INTEGER — Jira rejects strings
-          released:  r.status === "Released", // boolean
+          name:      vName,
+          projectId: projIdInt,
         };
-        // Only add dates if valid YYYY-MM-DD — omit if conversion failed
-        if (startDate)   payload.startDate   = startDate;   // "YYYY-MM-DD"
-        if (releaseDate) payload.releaseDate  = releaseDate; // "YYYY-MM-DD"
-        if (vDesc)       payload.description  = vDesc;       // string, optional
+        if (releaseDate) payload.releaseDate = releaseDate;
+        if (startDate)   payload.startDate   = startDate;
+        if (vDesc)       payload.description = vDesc.slice(0, 255);
+
+        // Log to browser console so we can see exact payload
+        console.log("JIRA PAYLOAD →", JSON.stringify(payload));
 
         const createRes = await jiraFetch(`rest/api/3/version`, {
           method: "POST", body: JSON.stringify(payload)
         });
         if (!createRes.ok) {
           const errBody = await createRes.text().catch(() => "");
-          throw new Error(`Jira version create failed (${createRes.status}): ${errBody}`);
+          console.error("JIRA ERROR ←", errBody);
+          throw new Error(`Jira ${createRes.status}: ${errBody}`);
         }
         const ver = await createRes.json();
         versionId = ver.id;
