@@ -147,49 +147,55 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       }
       const proj = await projRes.json();
 
-      // Step 2 — Check if version already exists (avoid duplicates)
-      // Version NAME format: 2026[Gateway - Adyen 3DS Report Breakdown] - RN-GAT-067
-      setSync(r.id, { status: "loading", msg: "Checking for existing version…" });
+      // Step 2 — Build version name and dates
+      setSync(r.id, { status: "loading", msg: "Preparing version data…" });
 
-      // Determine team label from modules
-      const gwMods  = ["Payments","Payouts","General"];
-      const appMods = ["App","Portal","Web"];
-      const mods    = r.modules || [];
-      const isGW    = mods.some(m => gwMods.includes(m));
-      const isApp   = mods.some(m => appMods.some(am => m === am));
-      // Pick the most specific module label: Portal, App, Web, Gateway, or first module
-      const teamLabel = (() => {
-        if (mods.includes("Portal"))   return "Portal";
-        if (mods.includes("App"))      return "App";
-        if (mods.includes("Web"))      return "Web";
-        if (isGW)                      return "Gateway";
-        if (mods.length)               return mods[0];
-        return "Release";
-      })();
+      // Team label from modules
+      const mods     = r.modules || [];
+      const isGW     = mods.some(m => ["Payments","Payouts","General"].includes(m));
+      const teamLabel = mods.includes("Portal") ? "Portal"
+                      : mods.includes("App")    ? "App"
+                      : mods.includes("Web")    ? "Web"
+                      : isGW                    ? "Gateway"
+                      : mods[0]                 || "Release";
 
-      // Year from release actual or planned date
-      const releaseYear = (() => {
-        const d = r.releaseActual || r.releasePlanned;
-        if (!d) return new Date().getFullYear();
-        const dt = new Date(d);
-        return isNaN(dt) ? new Date().getFullYear() : dt.getFullYear();
-      })();
+      // Type abbreviation
+      const typeAbbr = { "improvement":"Imp","bug":"BF","new feature":"NF","patch":"Patch" }[(r.type||"").toLowerCase()] || "NF";
 
-      // Type abbreviation: Improvement→Imp, Bug→BF, New Feature→NF, Patch→Patch
-      const typeAbbr = (() => {
-        const t = (r.type || "").toLowerCase();
-        if (t === "improvement")  return "Imp";
-        if (t === "bug")          return "BF";
-        if (t === "new feature")  return "NF";
-        if (t === "patch")        return "Patch";
-        return r.type || "NF";
-      })();
+      // Convert ANY date format → YYYY-MM-DD for Jira
+      // Handles: "9 March, 2026" | "1 January, 2026" | "2026-03-09" | "09/03/2026"
+      const MONTHS = {january:"01",february:"02",march:"03",april:"04",may:"05",june:"06",
+                      july:"07",august:"08",september:"09",october:"10",november:"11",december:"12"};
+      const toYMD = (d) => {
+        if (!d || typeof d !== "string") return null;
+        d = d.trim();
+        // YYYY-MM-DD already
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        // DD/MM/YYYY
+        const dmy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (dmy) return `${dmy[3]}-${dmy[2].padStart(2,"0")}-${dmy[1].padStart(2,"0")}`;
+        // "9 March, 2026" or "9 March 2026"
+        const text = d.match(/^(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})$/);
+        if (text) {
+          const mon = MONTHS[text[2].toLowerCase()];
+          if (mon) return `${text[3]}-${mon}-${text[1].padStart(2,"0")}`;
+        }
+        return null;
+      };
 
-      // Final format: 2026[Gateway Imp - Adyen 3DS Report Breakdown] - RN-GAT-067
+      // Year for title
+      const rawDate     = r.releaseActual || r.releasePlanned || "";
+      const ymdDate     = toYMD(rawDate);
+      const releaseYear = ymdDate ? ymdDate.slice(0,4) : String(new Date().getFullYear());
+
+      // Version name — NO square brackets (Jira rejects them)
       const rnSuffix = r.rn ? ` - ${r.rn}` : "";
-      const vName    = `${releaseYear}[${teamLabel} ${typeAbbr} - ${r.summary}]${rnSuffix}`.slice(0, 255);
-      const vDesc    = [r.rn, r.goal].filter(Boolean).join(" · ");
-      const jiraBase = cfg.base ? cfg.base.replace(/\/$/, "") : "https://datman.atlassian.net";
+      const vName    = `${releaseYear}_${teamLabel} ${typeAbbr} - ${r.summary}${rnSuffix}`.slice(0, 255);
+      const vDesc    = [r.rn, r.goal].filter(Boolean).join(" - ");
+      const jiraBase = (cfg.base || "https://datman.atlassian.net").replace(/\/$/, "");
+
+      // Check for existing version
+      setSync(r.id, { status: "loading", msg: "Checking for existing version…" });
       const listRes  = await jiraFetch(`rest/api/3/project/${cfg.key}/versions`);
       const existing = listRes.ok ? await listRes.json() : [];
       const found    = (Array.isArray(existing) ? existing : []).find(v => v.name === vName);
@@ -200,27 +206,41 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
         setSync(r.id, { status: "loading", msg: `Version exists (ID ${versionId}), adding related work…` });
       } else {
-        // Step 3 — Create new Fix Version
+        // Step 3 — Create Fix Version with clean payload
         setSync(r.id, { status: "loading", msg: "Creating Jira Fix Version…" });
+
+        const startDate   = toYMD(r.releasePlanned);
+        const releaseDate = toYMD(r.releaseActual) || toYMD(r.releasePlanned);
+
+        // Minimal payload — only the two required fields first
+        // to isolate whether name or dates are the issue
+        const projIdInt = parseInt(proj.id, 10);
+        if (isNaN(projIdInt)) throw new Error(`Project ID "${proj.id}" is not a number`);
+
         const payload = {
-          name:        vName,
-          description: vDesc,
-          projectId:   proj.id,
-          released:    r.status === "Released",
-          startDate:   r.releasePlanned || undefined,
-          releaseDate: r.releaseActual || r.releasePlanned || undefined,
+          name:      vName,
+          projectId: projIdInt,
         };
+        if (releaseDate) payload.releaseDate = releaseDate;
+        if (startDate)   payload.startDate   = startDate;
+        if (vDesc)       payload.description = vDesc.slice(0, 255);
+
+        const payloadStr = JSON.stringify(payload);
+
         const createRes = await jiraFetch(`rest/api/3/version`, {
-          method: "POST", body: JSON.stringify(payload)
+          method: "POST", body: payloadStr
         });
+        const responseText = await createRes.text().catch(() => "");
         if (!createRes.ok) {
-          const txt = await createRes.text();
-          throw new Error(`Create version failed (${createRes.status}):\n${txt}`);
+          // Full payload + response shown in UI so we can diagnose
+          throw new Error(
+            `HTTP ${createRes.status}\n\nSENT:\n${payloadStr}\n\nJIRA SAID:\n${responseText}`
+          );
         }
-        const ver = await createRes.json();
+        const ver = JSON.parse(responseText);
         versionId = ver.id;
         jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
-        setSync(r.id, { status: "loading", msg: `✓ Version created — adding related work…` });
+        setSync(r.id, { status: "loading", msg: `Version created — adding RN links…` });
       }
 
       // Step 4 — Add RN links as "related work" items (Development category)
@@ -280,7 +300,9 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       onSyncBack({ ...r, jiraLink, jiraLinks: [jiraLink, ...(r.jiraLinks || []).filter(l => l !== jiraLink)] });
 
     } catch (err) {
-      setSync(r.id, { status: "err", msg: err.message });
+      const msg = err.message || String(err);
+      console.error("SYNC ERROR:", msg);
+      setSync(r.id, { status: "err", msg });
     }
   }, [cfg, onSyncBack]);
 
@@ -396,6 +418,36 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         </div>
       )}
 
+      {/* ── Debug test panel ── */}
+      {showCfg && (
+        <div style={{ margin: "0.5rem 2rem 0", background: "#0a0a0a", border: "1px solid #333", borderRadius: 10, padding: "0.75rem 1rem", display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ color: "#4a7a96", fontSize: "0.7rem", fontWeight: 700 }}>TEST JIRA CONNECTION:</span>
+          <button onClick={async () => {
+            try {
+              const res  = await jiraFetch(`rest/api/3/project/${cfg.key}`);
+              const data = await res.json();
+              alert(`Project fetch: HTTP ${res.status}\n${JSON.stringify(data, null, 2).slice(0,400)}`);
+            } catch(e) { alert("Error: " + e.message); }
+          }} style={{ height: 24, padding: "0 0.75rem", background: "#0d3320", border: "1px solid #22c55e44", color: "#22c55e", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.7rem", fontWeight: 700 }}>
+            1. Test Project Fetch
+          </button>
+          <button onClick={async () => {
+            try {
+              const res  = await jiraFetch(`rest/api/3/project/${cfg.key}`);
+              const proj = await res.json();
+              const projIdInt = parseInt(proj.id, 10);
+              const minimal = { name: `TEST_${Date.now()}`, projectId: projIdInt };
+              alert(`About to POST:\n${JSON.stringify(minimal, null, 2)}\n\nprojectId type: ${typeof projIdInt}`);
+              const res2 = await jiraFetch(`rest/api/3/version`, { method: "POST", body: JSON.stringify(minimal) });
+              const txt  = await res2.text();
+              alert(`Version create: HTTP ${res2.status}\n${txt.slice(0,500)}`);
+            } catch(e) { alert("Error: " + e.message); }
+          }} style={{ height: 24, padding: "0 0.75rem", background: "#0f2d52", border: "1px solid #60a5fa44", color: "#60a5fa", borderRadius: 6, cursor: "pointer", fontFamily: "inherit", fontSize: "0.7rem", fontWeight: 700 }}>
+            2. Test Minimal Version Create
+          </button>
+        </div>
+      )}
+
       {/* ── Table ── */}
       <div style={{ padding: "1rem 2rem 1.5rem" }}>
         <div style={{ background: B.bgCard, border: `1px solid ${B.border}`, borderRadius: 12, overflow: "hidden" }}>
@@ -454,7 +506,10 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
                         {ss?.status === "loading"
                           ? <span style={{ color: B.teal, fontSize: "0.7rem" }}>⏳…</span>
                           : ss?.status === "err"
-                          ? <span style={{ color: "#ef4444", fontSize: "0.65rem" }} title={ss.msg}>✗ Error</span>
+                          ? <div style={{ color: "#ef4444", fontSize: "0.65rem" }}>
+                              <div style={{ fontWeight: 700 }}>✗ Failed</div>
+                              <div style={{ color: "#fca5a5", fontSize: "0.6rem", maxWidth: 200, whiteSpace: "pre-wrap", wordBreak: "break-all", marginTop: 2 }}>{ss.msg}</div>
+                            </div>
                           : (jiraHref && jiraHref !== "Not needed")
                           ? <a href={jiraHref} target="_blank" rel="noreferrer"
                               style={{ ...BTN({ background: "#0f2d5288", color: "#60a5fa", border: "1px solid #1e4a8066", height: 24, padding: "0 0.55rem", textDecoration: "none", fontSize: "0.7rem" }) }}>
