@@ -147,49 +147,55 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       }
       const proj = await projRes.json();
 
-      // Step 2 — Check if version already exists (avoid duplicates)
-      // Version NAME format: 2026[Gateway - Adyen 3DS Report Breakdown] - RN-GAT-067
-      setSync(r.id, { status: "loading", msg: "Checking for existing version…" });
+      // Step 2 — Build version name and dates
+      setSync(r.id, { status: "loading", msg: "Preparing version data…" });
 
-      // Determine team label from modules
-      const gwMods  = ["Payments","Payouts","General"];
-      const appMods = ["App","Portal","Web"];
-      const mods    = r.modules || [];
-      const isGW    = mods.some(m => gwMods.includes(m));
-      const isApp   = mods.some(m => appMods.some(am => m === am));
-      // Pick the most specific module label: Portal, App, Web, Gateway, or first module
-      const teamLabel = (() => {
-        if (mods.includes("Portal"))   return "Portal";
-        if (mods.includes("App"))      return "App";
-        if (mods.includes("Web"))      return "Web";
-        if (isGW)                      return "Gateway";
-        if (mods.length)               return mods[0];
-        return "Release";
-      })();
+      // Team label from modules
+      const mods     = r.modules || [];
+      const isGW     = mods.some(m => ["Payments","Payouts","General"].includes(m));
+      const teamLabel = mods.includes("Portal") ? "Portal"
+                      : mods.includes("App")    ? "App"
+                      : mods.includes("Web")    ? "Web"
+                      : isGW                    ? "Gateway"
+                      : mods[0]                 || "Release";
 
-      // Year from release actual or planned date
-      const releaseYear = (() => {
-        const d = r.releaseActual || r.releasePlanned;
-        if (!d) return new Date().getFullYear();
-        const dt = new Date(d);
-        return isNaN(dt) ? new Date().getFullYear() : dt.getFullYear();
-      })();
+      // Type abbreviation
+      const typeAbbr = { "improvement":"Imp","bug":"BF","new feature":"NF","patch":"Patch" }[(r.type||"").toLowerCase()] || "NF";
 
-      // Type abbreviation: Improvement→Imp, Bug→BF, New Feature→NF, Patch→Patch
-      const typeAbbr = (() => {
-        const t = (r.type || "").toLowerCase();
-        if (t === "improvement")  return "Imp";
-        if (t === "bug")          return "BF";
-        if (t === "new feature")  return "NF";
-        if (t === "patch")        return "Patch";
-        return r.type || "NF";
-      })();
+      // Convert ANY date format → YYYY-MM-DD for Jira
+      // Handles: "9 March, 2026" | "1 January, 2026" | "2026-03-09" | "09/03/2026"
+      const MONTHS = {january:"01",february:"02",march:"03",april:"04",may:"05",june:"06",
+                      july:"07",august:"08",september:"09",october:"10",november:"11",december:"12"};
+      const toYMD = (d) => {
+        if (!d || typeof d !== "string") return null;
+        d = d.trim();
+        // YYYY-MM-DD already
+        if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+        // DD/MM/YYYY
+        const dmy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (dmy) return `${dmy[3]}-${dmy[2].padStart(2,"0")}-${dmy[1].padStart(2,"0")}`;
+        // "9 March, 2026" or "9 March 2026"
+        const text = d.match(/^(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})$/);
+        if (text) {
+          const mon = MONTHS[text[2].toLowerCase()];
+          if (mon) return `${text[3]}-${mon}-${text[1].padStart(2,"0")}`;
+        }
+        return null;
+      };
 
-      // Final format: 2026 (Gateway Imp - Adyen 3DS Report Breakdown) - RN-GAT-067
+      // Year for title
+      const rawDate     = r.releaseActual || r.releasePlanned || "";
+      const ymdDate     = toYMD(rawDate);
+      const releaseYear = ymdDate ? ymdDate.slice(0,4) : String(new Date().getFullYear());
+
+      // Version name — NO square brackets (Jira rejects them)
       const rnSuffix = r.rn ? ` - ${r.rn}` : "";
       const vName    = `${releaseYear} (${teamLabel} ${typeAbbr} - ${r.summary})${rnSuffix}`.slice(0, 255);
-      const vDesc    = [r.rn, r.goal].filter(Boolean).join(" · ");
-      const jiraBase = cfg.base ? cfg.base.replace(/\/$/, "") : "https://datman.atlassian.net";
+      const vDesc    = [r.rn, r.goal].filter(Boolean).join(" - ");
+      const jiraBase = (cfg.base || "https://datman.atlassian.net").replace(/\/$/, "");
+
+      // Check for existing version
+      setSync(r.id, { status: "loading", msg: "Checking for existing version…" });
       const listRes  = await jiraFetch(`rest/api/3/project/${cfg.key}/versions`);
       const existing = listRes.ok ? await listRes.json() : [];
       const found    = (Array.isArray(existing) ? existing : []).find(v => v.name === vName);
@@ -200,55 +206,34 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
         setSync(r.id, { status: "loading", msg: `Version exists (ID ${versionId}), adding related work…` });
       } else {
-        // Step 3 — Create new Fix Version
-        // Jira v3 API rules:
-        //   projectId  must be integer (not string)
-        //   startDate / releaseDate must be YYYY-MM-DD or omitted entirely
-        //   dates from DB may be "1 January, 2026" — convert to YYYY-MM-DD
+        // Step 3 — Create Fix Version with clean payload
         setSync(r.id, { status: "loading", msg: "Creating Jira Fix Version…" });
-
-        const toYMD = (d) => {
-          if (!d || typeof d !== "string") return null;
-          d = d.trim();
-          // Already YYYY-MM-DD
-          if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-          // DD/MM/YYYY
-          if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(d)) {
-            const [dd, mm, yyyy] = d.split("/");
-            return `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
-          }
-          // "1 January, 2026" or "1 January 2026"
-          try {
-            const dt = new Date(d.replace(",",""));
-            if (!isNaN(dt)) return dt.toISOString().slice(0,10);
-          } catch {}
-          return null;
-        };
 
         const startDate   = toYMD(r.releasePlanned);
         const releaseDate = toYMD(r.releaseActual) || toYMD(r.releasePlanned);
 
-        // Build payload — only include optional fields if they have valid values
+        // STRICT payload — only fields Jira v3 accepts, types must be exact
         const payload = {
-          name:      vName,
-          projectId: Number(proj.id),   // must be integer
-          released:  r.status === "Released",
+          name:      vName,                 // string
+          projectId: parseInt(proj.id, 10), // INTEGER — Jira rejects strings
+          released:  r.status === "Released", // boolean
         };
-        if (vDesc)        payload.description = vDesc;
-        if (startDate)    payload.startDate   = startDate;
-        if (releaseDate)  payload.releaseDate  = releaseDate;
+        // Only add dates if valid YYYY-MM-DD — omit if conversion failed
+        if (startDate)   payload.startDate   = startDate;   // "YYYY-MM-DD"
+        if (releaseDate) payload.releaseDate  = releaseDate; // "YYYY-MM-DD"
+        if (vDesc)       payload.description  = vDesc;       // string, optional
 
         const createRes = await jiraFetch(`rest/api/3/version`, {
           method: "POST", body: JSON.stringify(payload)
         });
         if (!createRes.ok) {
-          const txt = await createRes.text();
-          throw new Error(`Create version failed (${createRes.status}): ${txt}`);
+          const errBody = await createRes.text().catch(() => "");
+          throw new Error(`Jira version create failed (${createRes.status}): ${errBody}`);
         }
         const ver = await createRes.json();
         versionId = ver.id;
         jiraLink  = `${jiraBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
-        setSync(r.id, { status: "loading", msg: `✓ Version created — adding related work…` });
+        setSync(r.id, { status: "loading", msg: `Version created — adding RN links…` });
       }
 
       // Step 4 — Add RN links as "related work" items (Development category)
