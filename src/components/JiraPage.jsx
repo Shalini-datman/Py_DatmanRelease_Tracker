@@ -141,18 +141,49 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       if (!pageIdMatch) throw new Error("Could not extract page ID from URL. Expected format: .../pages/{id}/...");
       const pageId = pageIdMatch[1];
 
-      // Fetch full page content via Confluence API
-      const res = await jiraFetch(`wiki/rest/api/content/${pageId}?expand=body.storage,version,space,metadata.labels`);
+      // Try multiple Confluence API formats — storage, view, export_view
+      // Some Confluence instances return empty storage but full view
+      let html = "", title = "", rawDebug = "";
+
+      // Try 1: body.storage + body.view + body.export_view all at once
+      const res = await jiraFetch(`wiki/rest/api/content/${pageId}?expand=body.storage,body.view,body.export_view,version,space`);
       if (!res.ok) {
         const txt = await res.text().catch(()=>"");
-        throw new Error(`Confluence fetch failed (${res.status}): ${txt.slice(0,200)}`);
+        throw new Error(`Confluence fetch failed (${res.status}): ${txt.slice(0,300)}`);
       }
       const data = await res.json();
-      const html  = data?.body?.storage?.value || "";
-      const title = data?.title || "";
+      title = data?.title || "";
+
+      // Pick whichever body format has content
+      const storage    = data?.body?.storage?.value     || "";
+      const view       = data?.body?.view?.value        || "";
+      const exportView = data?.body?.export_view?.value || "";
+
+      // Prefer storage (raw markup) → view (rendered) → export_view
+      html = storage || view || exportView;
+      rawDebug = JSON.stringify({
+        title,
+        storageLen:    storage.length,
+        viewLen:       view.length,
+        exportViewLen: exportView.length,
+        bodyKeys:      Object.keys(data?.body || {}),
+        topKeys:       Object.keys(data || {}),
+        storagePreview: storage.slice(0, 300),
+        viewPreview:    view.slice(0, 300),
+      }, null, 2);
+
+      // If still empty try Confluence v2 API
+      if (!html) {
+        const res2 = await jiraFetch(`wiki/api/v2/pages/${pageId}?body-format=storage`);
+        if (res2.ok) {
+          const d2 = await res2.json();
+          html = d2?.body?.storage?.value || d2?.body?.value || "";
+          rawDebug += "\n\nv2 response: " + JSON.stringify({ bodyKeys: Object.keys(d2?.body||{}), len: html.length, preview: html.slice(0,200) });
+        }
+      }
 
       // ── Extract all fields from page ──────────────────────────────────────
-      const result = { title, pageId, url, html: html.slice(0, 500), fields: {} };
+      const result = { title, pageId, url, html: html.slice(0, 800), rawDebug, fields: {} };
 
       // 1. Jira ticket IDs
       // Tickets always start with DN- per project convention
@@ -517,14 +548,14 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
 
         <div style={{ width: 1, height: 18, background: B.border2, flexShrink: 0 }}/>
 
-        {/* Tab switcher */}
-        <div style={{ display: "flex", background: "#0d0d0d", borderRadius: 8, padding: "0.18rem", border: `1px solid ${B.border2}`, flexShrink: 0 }}>
+        {/* Tab switcher — prominent */}
+        <div style={{ display: "flex", background: "#0d0d0d", borderRadius: 8, padding: "0.2rem", border: `1px solid ${B.border2}`, flexShrink: 0 }}>
           {[["sync","⬆ Sync"],["parser","🔍 Parse RN"]].map(([tab, label]) => (
             <button key={tab} onClick={() => setActiveTab(tab)}
-              style={{ height: 22, padding: "0 0.75rem", borderRadius: 6, border: "none", cursor: "pointer",
-                       fontFamily: FONT, fontSize: "0.7rem", fontWeight: 700,
+              style={{ height: 26, padding: "0 1rem", borderRadius: 6, border: "none", cursor: "pointer",
+                       fontFamily: FONT, fontSize: "0.75rem", fontWeight: 700,
                        background: activeTab === tab ? B.grad1 : "transparent",
-                       color:      activeTab === tab ? "#fff"  : B.textMuted }}>
+                       color:      activeTab === tab ? "#fff"  : B.textSecondary }}>
               {label}
             </button>
           ))}
@@ -798,8 +829,18 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
             )}
             {/* Raw HTML preview */}
             <details style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>Raw HTML preview (first 500 chars)</summary>
-              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{rnParseResult.html}</pre>
+              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>
+                Debug info — HTML length: {rnParseResult.html?.length || 0} chars
+              </summary>
+              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {rnParseResult.rawDebug || "no debug info"}
+              </pre>
+              {rnParseResult.html && (
+                <pre style={{ color: "#22c55e", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                  HTML preview:{"
+"}{rnParseResult.html}
+                </pre>
+              )}
             </details>
           </div>
         )}
