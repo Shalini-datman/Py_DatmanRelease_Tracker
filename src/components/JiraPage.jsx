@@ -70,6 +70,7 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
   const [rnParseResult, setRnParseResult] = useState(null);
   const [rnParsing,     setRnParsing]     = useState(false);
   const [rnParseUrl,    setRnParseUrl]    = useState("");
+  const [activeTab,     setActiveTab]     = useState("sync"); // "sync" | "parser"
 
   // ── Filtered releases ────────────────────────────────────────────────────────
   const hasJiraLink = r => !!(r.jiraLink && r.jiraLink.trim() && r.jiraLink !== "Not needed" && r.jiraLink !== "Not needed");
@@ -514,6 +515,21 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
           style={{ height: 26, background: "#0d0d0d", border: `1px solid ${B.border2}`, borderRadius: 7, color: "#fff", fontFamily: FONT, fontSize: "0.72rem", padding: "0 0.7rem", outline: "none", width: 160, flexShrink: 0 }} />
 
+        <div style={{ width: 1, height: 18, background: B.border2, flexShrink: 0 }}/>
+
+        {/* Tab switcher */}
+        <div style={{ display: "flex", background: "#0d0d0d", borderRadius: 8, padding: "0.18rem", border: `1px solid ${B.border2}`, flexShrink: 0 }}>
+          {[["sync","⬆ Sync"],["parser","🔍 Parse RN"]].map(([tab, label]) => (
+            <button key={tab} onClick={() => setActiveTab(tab)}
+              style={{ height: 22, padding: "0 0.75rem", borderRadius: 6, border: "none", cursor: "pointer",
+                       fontFamily: FONT, fontSize: "0.7rem", fontWeight: 700,
+                       background: activeTab === tab ? B.grad1 : "transparent",
+                       color:      activeTab === tab ? "#fff"  : B.textMuted }}>
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* Right: count + action buttons */}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "0.4rem", flexShrink: 0 }}>
           <span style={{ color: B.textMuted, fontSize: "0.68rem" }}>{rows.length} of {stats.total} to sync</span>
@@ -568,97 +584,8 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         </div>
       )}
 
-      {/* ── RN Page Parser Panel ── */}
-      <div style={{ margin: "0.75rem 2rem 0", background: "#060f1a", border: `1px solid ${B.teal}44`, borderRadius: 12, padding: "1.1rem 1.25rem" }}>
-        <div style={{ color: B.teal, fontSize: "0.72rem", fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: "0.75rem" }}>
-          🔍 RN Page Parser — Paste a Confluence RN URL to see what will be extracted
-        </div>
-        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-          <input value={rnParseUrl} onChange={e => setRnParseUrl(e.target.value)}
-            placeholder="https://datman.atlassian.net/wiki/spaces/DN/pages/3468001291/..."
-            style={{ flex: 1, height: 30, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, color: "#fff", fontFamily: FONT, fontSize: "0.75rem", padding: "0 0.75rem", outline: "none" }}
-          />
-          <button onClick={() => parseRNPage(rnParseUrl)} disabled={rnParsing || !rnParseUrl}
-            style={{ height: 30, padding: "0 1rem", background: B.grad1, border: "none", color: "#fff", borderRadius: 7, cursor: "pointer", fontFamily: FONT, fontSize: "0.72rem", fontWeight: 700, opacity: rnParsing ? 0.6 : 1 }}>
-            {rnParsing ? "Parsing…" : "Parse RN"}
-          </button>
-        </div>
-        {rnParseResult && !rnParseResult.success && (
-          <div style={{ color: "#ef4444", fontSize: "0.75rem", padding: "0.5rem 0.75rem", background: "#2d0a0a", borderRadius: 8 }}>
-            ✗ {rnParseResult.error}
-          </div>
-        )}
-        {rnParseResult?.success && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            {/* Title */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.2rem" }}>Page Title</div>
-              <div style={{ color: B.textPrimary, fontSize: "0.82rem", fontWeight: 500 }}>{rnParseResult.title}</div>
-            </div>
-            {/* Jira Tickets */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                Jira Tickets Found ({rnParseResult.fields.jiraTickets?.length || 0})
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                {(rnParseResult.fields.jiraTickets || []).length === 0
-                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — no DN-XXXX tickets in this page</span>
-                  : (rnParseResult.fields.jiraTickets || []).map(t => (
-                      <span key={t} style={{ background: "#0f2d52", color: "#60a5fa", border: "1px solid #1e4a8066", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{t}</span>
-                    ))}
-              </div>
-            </div>
-            {/* Approved By */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                Approved By ({rnParseResult.fields.approvedBy?.length || 0})
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                {(rnParseResult.fields.approvedBy || []).length === 0
-                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — check page has an approval table/section</span>
-                  : (rnParseResult.fields.approvedBy || []).map(n => (
-                      <span key={n} style={{ background: "#22c55e18", color: "#22c55e", border: "1px solid #22c55e44", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{n}</span>
-                    ))}
-              </div>
-            </div>
-            {/* Table Data */}
-            {Object.keys(rnParseResult.fields.tableData || {}).length > 0 && (
-              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.5rem" }}>
-                  Table Data Extracted ({Object.keys(rnParseResult.fields.tableData).length} rows)
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.72rem" }}>
-                  {Object.entries(rnParseResult.fields.tableData).slice(0, 20).map(([k, v]) => (
-                    <tr key={k}>
-                      <td style={{ color: B.textMuted, padding: "0.2rem 0.75rem 0.2rem 0", whiteSpace: "nowrap", verticalAlign: "top", width: "35%", fontWeight: 600 }}>{k}</td>
-                      <td style={{ color: B.textPrimary, padding: "0.2rem 0", wordBreak: "break-word" }}>{v.slice(0, 200)}</td>
-                    </tr>
-                  ))}
-                </table>
-              </div>
-            )}
-            {/* Headings */}
-            {(rnParseResult.fields.headings || []).length > 0 && (
-              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                  Page Sections / Headings
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                  {(rnParseResult.fields.headings || []).map((h, i) => (
-                    <span key={i} style={{ background: B.border, color: B.textSecondary, padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.7rem" }}>{h}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            {/* Raw HTML preview */}
-            <details style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>Raw HTML preview (first 500 chars)</summary>
-              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{rnParseResult.html}</pre>
-            </details>
-          </div>
-        )}
-      </div>
-
+      {/* ── Sync tab ── */}
+      {activeTab === "sync" && <>
       {/* ── Debug test panel ── */}
       {showCfg && (
         <div style={{ margin: "0.5rem 2rem 0", background: "#0a0a0a", border: "1px solid #333", borderRadius: 10, padding: "0.75rem 1rem", display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
@@ -784,6 +711,103 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         </div>
       </div>
       <PaginationBar current={jiraPage} total={jiraTotalPages} onChange={setJiraPage} count={rows.length} label="releases" />
+      </>}
+
+      {/* ── RN Parser tab ── */}
+      {activeTab === "parser" && (
+      <div style={{ margin: "0.75rem 2rem 0", background: "#060f1a", border: `1px solid ${B.teal}44`, borderRadius: 12, padding: "1.1rem 1.25rem" }}>
+        <div style={{ color: B.teal, fontSize: "0.72rem", fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: "0.75rem" }}>
+          🔍 RN Page Parser — Paste a Confluence RN URL to see what will be extracted
+        </div>
+        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+          <input value={rnParseUrl} onChange={e => setRnParseUrl(e.target.value)}
+            placeholder="https://datman.atlassian.net/wiki/spaces/DN/pages/3468001291/..."
+            style={{ flex: 1, height: 30, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, color: "#fff", fontFamily: FONT, fontSize: "0.75rem", padding: "0 0.75rem", outline: "none" }}
+          />
+          <button onClick={() => parseRNPage(rnParseUrl)} disabled={rnParsing || !rnParseUrl}
+            style={{ height: 30, padding: "0 1rem", background: B.grad1, border: "none", color: "#fff", borderRadius: 7, cursor: "pointer", fontFamily: FONT, fontSize: "0.72rem", fontWeight: 700, opacity: rnParsing ? 0.6 : 1 }}>
+            {rnParsing ? "Parsing…" : "Parse RN"}
+          </button>
+        </div>
+        {rnParseResult && !rnParseResult.success && (
+          <div style={{ color: "#ef4444", fontSize: "0.75rem", padding: "0.5rem 0.75rem", background: "#2d0a0a", borderRadius: 8 }}>
+            ✗ {rnParseResult.error}
+          </div>
+        )}
+        {rnParseResult?.success && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            {/* Title */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.2rem" }}>Page Title</div>
+              <div style={{ color: B.textPrimary, fontSize: "0.82rem", fontWeight: 500 }}>{rnParseResult.title}</div>
+            </div>
+            {/* Jira Tickets */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                Jira Tickets Found ({rnParseResult.fields.jiraTickets?.length || 0})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {(rnParseResult.fields.jiraTickets || []).length === 0
+                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — no DN-XXXX tickets in this page</span>
+                  : (rnParseResult.fields.jiraTickets || []).map(t => (
+                      <span key={t} style={{ background: "#0f2d52", color: "#60a5fa", border: "1px solid #1e4a8066", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{t}</span>
+                    ))}
+              </div>
+            </div>
+            {/* Approved By */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                Approved By ({rnParseResult.fields.approvedBy?.length || 0})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {(rnParseResult.fields.approvedBy || []).length === 0
+                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — check page has an approval table/section</span>
+                  : (rnParseResult.fields.approvedBy || []).map(n => (
+                      <span key={n} style={{ background: "#22c55e18", color: "#22c55e", border: "1px solid #22c55e44", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{n}</span>
+                    ))}
+              </div>
+            </div>
+            {/* Table Data */}
+            {Object.keys(rnParseResult.fields.tableData || {}).length > 0 && (
+              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.5rem" }}>
+                  Table Data Extracted ({Object.keys(rnParseResult.fields.tableData).length} rows)
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.72rem" }}>
+                  {Object.entries(rnParseResult.fields.tableData).slice(0, 20).map(([k, v]) => (
+                    <tr key={k}>
+                      <td style={{ color: B.textMuted, padding: "0.2rem 0.75rem 0.2rem 0", whiteSpace: "nowrap", verticalAlign: "top", width: "35%", fontWeight: 600 }}>{k}</td>
+                      <td style={{ color: B.textPrimary, padding: "0.2rem 0", wordBreak: "break-word" }}>{v.slice(0, 200)}</td>
+                    </tr>
+                  ))}
+                </table>
+              </div>
+            )}
+            {/* Headings */}
+            {(rnParseResult.fields.headings || []).length > 0 && (
+              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                  Page Sections / Headings
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                  {(rnParseResult.fields.headings || []).map((h, i) => (
+                    <span key={i} style={{ background: B.border, color: B.textSecondary, padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.7rem" }}>{h}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Raw HTML preview */}
+            <details style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>Raw HTML preview (first 500 chars)</summary>
+              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{rnParseResult.html}</pre>
+            </details>
+          </div>
+        )}
+      </div>
+
+
+      )}
+
     </div>
   );
 
