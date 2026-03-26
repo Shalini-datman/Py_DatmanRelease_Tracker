@@ -35,6 +35,9 @@ def clean(s):
 
 def get_html(page_id):
     debug, title = [], ""
+    if not JIRA_BASE:
+        return "", "", ["JIRA_BASE_URL env var not set"]
+
     for i, path in enumerate([
         f"wiki/rest/api/content/{page_id}/body/storage",
         f"wiki/rest/api/content/{page_id}/body/view",
@@ -62,6 +65,7 @@ def get_html(page_id):
     return "", title, debug
 
 def get_comments(page_id):
+    if not JIRA_BASE: return [], "comments skipped — JIRA_BASE_URL not set"
     s, d = fetch(f"wiki/rest/api/content/{page_id}/child/comment?expand=body.view,body.storage,history&limit=50")
     if s != 200: return [], f"comments HTTP {s}"
     results = d.get("results",[])
@@ -146,10 +150,13 @@ def parse_page(html, comments, page_title=""):
         if name and name not in approvers: approvers.append(name)
     # Known names near approval keywords in all comments
     all_text = ' '.join(c.get('text','') for c in comments).lower()
+    # Escape special regex chars in keywords before joining
+    safe_kw = [re.escape(k) for k in APPROVAL_KW]
     for name in KNOWN_APPROVERS:
         full = name.capitalize()
         if full not in approvers:
-            if re.search(rf'\b{name}\b.{{0,50}}(?:{"|".join(APPROVAL_KW)})', all_text, re.IGNORECASE):
+            pat = rf'\b{re.escape(name)}\b.{{0,50}}(?:{"|".join(safe_kw)})'
+            if re.search(pat, all_text, re.IGNORECASE):
                 approvers.append(full)
 
     result['approvedBy']      = approvers
