@@ -62,9 +62,14 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
   const [typeFilter, setTypeFilter] = useState("All");
   const [showPending, setShowPending] = useState("all"); // "all" only now
 
-  // ── Sync state: { [releaseId]: { status:"idle"|"loading"|"ok"|"err", msg, versionId, link } }
+  // ── Sync state
   const [syncState, setSyncState] = useState({});
   const setSync = (id, patch) => setSyncState(s => ({ ...s, [id]: { ...s[id], ...patch } }));
+
+  // ── RN Parser state
+  const [rnParseResult, setRnParseResult] = useState(null);
+  const [rnParsing,     setRnParsing]     = useState(false);
+  const [rnParseUrl,    setRnParseUrl]    = useState("");
 
   // ── Filtered releases ────────────────────────────────────────────────────────
   const hasJiraLink = r => !!(r.jiraLink && r.jiraLink.trim() && r.jiraLink !== "Not needed" && r.jiraLink !== "Not needed");
@@ -123,6 +128,105 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
       if (err.missing) throw new Error(`Vercel env vars not set: ${err.missing.join(", ")}. Add them in Vercel → Settings → Environment Variables.`);
     }
     return res;
+  };
+
+  // ── RN Page Parser ────────────────────────────────────────────────────────────
+  const parseRNPage = async (url) => {
+    if (!url) return;
+    setRnParsing(true); setRnParseResult(null);
+    try {
+      // Extract page ID from URL
+      const pageIdMatch = url.match(/\/pages\/(\d+)/);
+      if (!pageIdMatch) throw new Error("Could not extract page ID from URL. Expected format: .../pages/{id}/...");
+      const pageId = pageIdMatch[1];
+
+      // Fetch full page content via Confluence API
+      const res = await jiraFetch(`wiki/rest/api/content/${pageId}?expand=body.storage,version,space,metadata.labels`);
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>"");
+        throw new Error(`Confluence fetch failed (${res.status}): ${txt.slice(0,200)}`);
+      }
+      const data = await res.json();
+      const html  = data?.body?.storage?.value || "";
+      const title = data?.title || "";
+
+      // ── Extract all fields from page ──────────────────────────────────────
+      const result = { title, pageId, url, html: html.slice(0, 500), fields: {} };
+
+      // 1. Jira ticket IDs
+      // Tickets always start with DN- per project convention
+      const tickets = [...new Set((html.match(/\bDN-\d+\b/g) || []))];
+      result.fields.jiraTickets = tickets;
+
+      // 2. Release date from title (e.g. "25-03-2026" or "25/03/2026")
+      const dateFromTitle = title.match(/(\d{1,2}[-/]\d{2}[-/]\d{4})/);
+      result.fields.releaseDateFromTitle = dateFromTitle ? dateFromTitle[1] : null;
+
+      // 3. Parse all table rows — extract key:value pairs
+      const tableRows = {};
+      const trMatches = html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
+      for (const tr of trMatches) {
+        const cells = [...tr[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)]
+          .map(m => m[1].replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&nbsp;/g," ").trim())
+          .filter(Boolean);
+        if (cells.length >= 2) {
+          const key = cells[0].toLowerCase().replace(/[^a-z0-9]/g, "_");
+          tableRows[key] = cells.slice(1).join(" | ");
+        }
+      }
+      result.fields.tableData = tableRows;
+
+      // 4. Approved by — look for approval table rows
+      const approvedBy = [];
+      const approvalPatterns = [/approv/i, /sign.?off/i, /reviewed.?by/i];
+      for (const [k, v] of Object.entries(tableRows)) {
+        if (approvalPatterns.some(p => p.test(k)) || approvalPatterns.some(p => p.test(v))) {
+          // Extract names from the value — comma or newline separated
+          const names = v.split(/[,\n|]+/).map(n => n.trim()).filter(n => n.length > 1 && n.length < 40);
+          approvedBy.push(...names);
+        }
+      }
+      // Also look for "Approved by: Name" patterns in plain text
+      const approvedMatches = html.matchAll(/approved[^:]*by[^:]*:([^<\n]+)/gi);
+      for (const m of approvedMatches) {
+        const names = m[1].replace(/<[^>]+>/g,"").split(/[,|]+/).map(n=>n.trim()).filter(Boolean);
+        approvedBy.push(...names);
+      }
+      result.fields.approvedBy = [...new Set(approvedBy)];
+
+      // 5. Lead developer / DORA fields
+      const doraKeys = {
+        lead_developer: ["lead_dev","developer","lead_developer","author"],
+        application:    ["application","app","service_name"],
+        services:       ["services","microservices","components"],
+        handover_date:  ["handover","handover_date","code_freeze"],
+      };
+      for (const [field, keys] of Object.entries(doraKeys)) {
+        for (const k of keys) {
+          const found = Object.entries(tableRows).find(([key]) => key.includes(k));
+          if (found) { result.fields[field] = found[1]; break; }
+        }
+      }
+
+      // 6. Extract all headings
+      const headings = [...html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)]
+        .map(m => m[1].replace(/<[^>]+>/g,"").trim()).filter(Boolean);
+      result.fields.headings = headings;
+
+      // 7. External links (test evidence, PRs etc)
+      const links = [...new Set(
+        [...html.matchAll(/href=["']([^"']+)["']/gi)]
+          .map(m => m[1])
+          .filter(l => l.startsWith("http") && !l.includes("atlassian.net/browse") && !l.includes("wiki"))
+      )].slice(0, 10);
+      result.fields.externalLinks = links;
+
+      setRnParseResult({ success: true, ...result });
+    } catch (e) {
+      setRnParseResult({ success: false, error: e.message });
+    } finally {
+      setRnParsing(false);
+    }
   };
 
   const syncToJira = useCallback(async (r) => {
@@ -192,7 +296,11 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         }
       } else {
         log("Creating Jira Fix Version…");
-        const payload = { name: vName, projectId: projIdInt };
+        const payload = {
+          name:      vName,
+          projectId: projIdInt,
+          released:  false,   // always start unreleased — never auto-mark
+        };
         if (startDate)   payload.startDate   = startDate;
         if (releaseDate) payload.releaseDate  = releaseDate;
         if (r.rn || r.goal) payload.description = [r.rn, r.goal].filter(Boolean).join(" - ").slice(0,255);
@@ -247,10 +355,8 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
             const confData = await confRes.json();
             const html     = confData?.body?.storage?.value || "";
             // Extract all Jira ticket IDs from the page content
-            const PROJECT_KEY = cfg.key.toUpperCase();
-            const allTickets  = [...new Set(
-              (html.match(new RegExp(`\\b${PROJECT_KEY}-\\d+\\b`, 'g')) || [])
-            )];
+            // Tickets always start with DN- per project convention
+            const allTickets = [...new Set((html.match(/\bDN-\d+\b/g) || []))];
             jiraTickets = allTickets;
             results.tickets = allTickets;
             log(`Found ${allTickets.length} Jira ticket(s) in RN page…`);
@@ -279,7 +385,10 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
                   update: { fixVersions: [{ add: { id: versionId } }] }
                 })
               });
+              const updateTxt = await updateRes.text().catch(()=>"");
+              console.log(`Ticket ${ticketKey}: ${updateRes.status} ${updateTxt.slice(0,100)}`);
               if (updateRes.ok || updateRes.status === 204) added++;
+              else results.errors.push(`Ticket ${ticketKey}: ${updateRes.status} ${updateTxt.slice(0,80)}`);
             } else { added++; }
           } catch {}
         }
@@ -318,24 +427,17 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         }
       }
 
-      // ── STEP 7: Mark Released (only if core data updated successfully) ──────
-      const coreSuccess = versionId && (rnLinks.length === 0 || results.related);
-      if (coreSuccess && r.status === "Released" && releaseDate) {
-        log("Marking version as Released…");
-        const markRes = await jiraFetch(`rest/api/3/version/${versionId}`, {
-          method: "PUT",
-          body: JSON.stringify({ released: true, releaseDate })
-        });
-        if (markRes.ok) results.released = true;
-        else results.errors.push(`Mark released failed: ${markRes.status}`);
-      }
+      // ── STEP 7: Keep version UNRELEASED always ─────────────────────────────
+      // Per requirements: always leave as Unreleased on Jira so team can verify
+      // Jira status must be manually changed to Released after review
+      results.released = false;
 
       // ── Build summary message ───────────────────────────────────────────────
       const parts = [];
       if (results.related)          parts.push(`${rnLinks.length} RN link(s)`);
       if (results.tickets.length)   parts.push(`${results.tickets.length} ticket(s)`);
       if (results.approvers.length) parts.push(`${results.approvers.length} approver(s)`);
-      if (results.released)         parts.push("marked Released");
+      parts.push("kept Unreleased");
 
       const errNote = results.errors.length ? ` (${results.errors.length} warning(s): ${results.errors.slice(0,2).join("; ")})` : "";
       setSync(r.id, {
@@ -465,6 +567,97 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
           </div>
         </div>
       )}
+
+      {/* ── RN Page Parser Panel ── */}
+      <div style={{ margin: "0.75rem 2rem 0", background: "#060f1a", border: `1px solid ${B.teal}44`, borderRadius: 12, padding: "1.1rem 1.25rem" }}>
+        <div style={{ color: B.teal, fontSize: "0.72rem", fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: "0.75rem" }}>
+          🔍 RN Page Parser — Paste a Confluence RN URL to see what will be extracted
+        </div>
+        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+          <input value={rnParseUrl} onChange={e => setRnParseUrl(e.target.value)}
+            placeholder="https://datman.atlassian.net/wiki/spaces/DN/pages/3468001291/..."
+            style={{ flex: 1, height: 30, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, color: "#fff", fontFamily: FONT, fontSize: "0.75rem", padding: "0 0.75rem", outline: "none" }}
+          />
+          <button onClick={() => parseRNPage(rnParseUrl)} disabled={rnParsing || !rnParseUrl}
+            style={{ height: 30, padding: "0 1rem", background: B.grad1, border: "none", color: "#fff", borderRadius: 7, cursor: "pointer", fontFamily: FONT, fontSize: "0.72rem", fontWeight: 700, opacity: rnParsing ? 0.6 : 1 }}>
+            {rnParsing ? "Parsing…" : "Parse RN"}
+          </button>
+        </div>
+        {rnParseResult && !rnParseResult.success && (
+          <div style={{ color: "#ef4444", fontSize: "0.75rem", padding: "0.5rem 0.75rem", background: "#2d0a0a", borderRadius: 8 }}>
+            ✗ {rnParseResult.error}
+          </div>
+        )}
+        {rnParseResult?.success && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+            {/* Title */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.2rem" }}>Page Title</div>
+              <div style={{ color: B.textPrimary, fontSize: "0.82rem", fontWeight: 500 }}>{rnParseResult.title}</div>
+            </div>
+            {/* Jira Tickets */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                Jira Tickets Found ({rnParseResult.fields.jiraTickets?.length || 0})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {(rnParseResult.fields.jiraTickets || []).length === 0
+                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — no DN-XXXX tickets in this page</span>
+                  : (rnParseResult.fields.jiraTickets || []).map(t => (
+                      <span key={t} style={{ background: "#0f2d52", color: "#60a5fa", border: "1px solid #1e4a8066", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{t}</span>
+                    ))}
+              </div>
+            </div>
+            {/* Approved By */}
+            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                Approved By ({rnParseResult.fields.approvedBy?.length || 0})
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                {(rnParseResult.fields.approvedBy || []).length === 0
+                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — check page has an approval table/section</span>
+                  : (rnParseResult.fields.approvedBy || []).map(n => (
+                      <span key={n} style={{ background: "#22c55e18", color: "#22c55e", border: "1px solid #22c55e44", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{n}</span>
+                    ))}
+              </div>
+            </div>
+            {/* Table Data */}
+            {Object.keys(rnParseResult.fields.tableData || {}).length > 0 && (
+              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.5rem" }}>
+                  Table Data Extracted ({Object.keys(rnParseResult.fields.tableData).length} rows)
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.72rem" }}>
+                  {Object.entries(rnParseResult.fields.tableData).slice(0, 20).map(([k, v]) => (
+                    <tr key={k}>
+                      <td style={{ color: B.textMuted, padding: "0.2rem 0.75rem 0.2rem 0", whiteSpace: "nowrap", verticalAlign: "top", width: "35%", fontWeight: 600 }}>{k}</td>
+                      <td style={{ color: B.textPrimary, padding: "0.2rem 0", wordBreak: "break-word" }}>{v.slice(0, 200)}</td>
+                    </tr>
+                  ))}
+                </table>
+              </div>
+            )}
+            {/* Headings */}
+            {(rnParseResult.fields.headings || []).length > 0 && (
+              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
+                  Page Sections / Headings
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
+                  {(rnParseResult.fields.headings || []).map((h, i) => (
+                    <span key={i} style={{ background: B.border, color: B.textSecondary, padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.7rem" }}>{h}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Raw HTML preview */}
+            <details style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
+              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>Raw HTML preview (first 500 chars)</summary>
+              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{rnParseResult.html}</pre>
+            </details>
+          </div>
+        )}
+      </div>
 
       {/* ── Debug test panel ── */}
       {showCfg && (
