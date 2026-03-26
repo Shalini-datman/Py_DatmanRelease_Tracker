@@ -254,129 +254,49 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
         jiraLink   = `${jBase}/projects/${cfg.key}/versions/${versionId}/tab/release-report-all-issues`;
       }
 
-      // ── STEP 3: Add Related Work (RN links) ─────────────────────────────────
-      const rnLinks = [...new Set([...(r.rnLinks||[]), ...(r.rnLink?[r.rnLink]:[])])].filter(Boolean);
-      if (rnLinks.length > 0) {
-        log(`Adding ${rnLinks.length} RN link(s) as related work…`);
-        for (const [idx, lnk] of rnLinks.entries()) {
-          const remRes = await jiraFetch(`rest/api/3/version/${versionId}/remotelink`, {
-            method: "POST",
-            body: JSON.stringify({
-              url:      lnk,
-              title:    idx === 0 ? (r.rn || r.summary) : `${r.rn || r.summary} (${idx+1})`,
-              summary:  r.summary,
-              relationship: "Development",
-              object: {
-                url:   lnk,
-                title: idx === 0 ? (r.rn || r.summary) : `${r.rn || r.summary} (${idx+1})`,
-                icon:  { url16x16: "https://www.atlassian.com/favicon.ico", title: "Release Note" },
-                status: { resolved: r.status === "Released", icon: { url16x16:"", title: r.status, link:"" } },
-              },
-              application: { type: "com.atlassian.confluence", name: "Release Notes" },
-            })
-          });
-          if (remRes.ok || remRes.status === 404) results.related = true;
-          else results.errors.push(`Related work link ${idx+1}: HTTP ${remRes.status}`);
-        }
-      }
-
-      // ── STEP 4: Parse RN Confluence page → extract Jira ticket IDs ──────────
-      let jiraTickets = [];
-      const rnPageUrl = rnLinks[0] || "";
-      const pageIdMatch = rnPageUrl.match(/\/pages\/(\d+)/);
-      if (pageIdMatch) {
-        log("Fetching RN page to extract Jira tickets…");
-        try {
-          const pageId  = pageIdMatch[1];
-          // Confluence REST API — fetch page body in storage format
-          const confRes = await jiraFetch(`wiki/rest/api/content/${pageId}?expand=body.storage`);
-          if (confRes.ok) {
-            const confData = await confRes.json();
-            const html     = confData?.body?.storage?.value || "";
-            // Extract all Jira ticket IDs from the page content
-            // Tickets always start with DN- per project convention
-            const allTickets = [...new Set((html.match(/\bDN-\d+\b/g) || []))];
-            jiraTickets = allTickets;
-            results.tickets = allTickets;
-            log(`Found ${allTickets.length} Jira ticket(s) in RN page…`);
-          }
-        } catch (e) {
-          results.errors.push(`RN page parse: ${e.message}`);
-        }
-      }
-
-      // ── STEP 5: Add tickets as work items (set fixVersion on each issue) ────
-      if (jiraTickets.length > 0) {
-        log(`Adding ${jiraTickets.length} work item(s) to version…`);
-        let added = 0;
-        for (const ticketKey of jiraTickets) {
-          try {
-            // Get current issue fixVersions
-            const issRes  = await jiraFetch(`rest/api/3/issue/${ticketKey}?fields=fixVersions`);
-            if (!issRes.ok) continue;
-            const issData = await issRes.json();
-            const existingFV = (issData?.fields?.fixVersions || []).map(v => ({ id: v.id }));
-            // Add this version if not already there
-            if (!existingFV.find(v => v.id === versionId)) {
-              const updateRes = await jiraFetch(`rest/api/3/issue/${ticketKey}`, {
-                method: "PUT",
-                body: JSON.stringify({
-                  update: { fixVersions: [{ add: { id: versionId } }] }
-                })
-              });
-              const updateTxt = await updateRes.text().catch(()=>"");
-              console.log(`Ticket ${ticketKey}: ${updateRes.status} ${updateTxt.slice(0,100)}`);
-              if (updateRes.ok || updateRes.status === 204) added++;
-              else results.errors.push(`Ticket ${ticketKey}: ${updateRes.status} ${updateTxt.slice(0,80)}`);
-            } else { added++; }
-          } catch {}
-        }
-        log(`Added ${added}/${jiraTickets.length} work items…`);
-      }
-
-      // ── STEP 6: Find and assign approvers ───────────────────────────────────
-      const approvedNames = Object.entries(r.approvals || {})
-        .filter(([, v]) => v === true)
-        .map(([k]) => k);
-
-      if (approvedNames.length > 0) {
-        log(`Looking up ${approvedNames.length} approver(s)…`);
-        for (const name of approvedNames) {
-          try {
-            const searchRes  = await jiraFetch(`rest/api/3/user/search?query=${encodeURIComponent(name)}&maxResults=5`);
-            if (!searchRes.ok) { results.errors.push(`User search for ${name} failed`); continue; }
-            const users      = await searchRes.json();
-            const match      = Array.isArray(users) ? users.find(u =>
-              (u.displayName || "").toLowerCase().includes(name.toLowerCase()) ||
-              (u.emailAddress || "").toLowerCase().includes(name.toLowerCase())
-            ) : null;
-            if (match) {
-              // Add user as reviewer/watcher on the version (Jira uses watchers endpoint)
-              await jiraFetch(`rest/api/3/version/${versionId}/watchers`, {
-                method: "POST",
-                body: JSON.stringify(match.accountId)
-              });
-              results.approvers.push(name);
-            } else {
-              results.errors.push(`Approver "${name}" not found in Jira`);
-            }
-          } catch (e) {
-            results.errors.push(`Approver ${name}: ${e.message}`);
-          }
-        }
-      }
-
-      // ── STEP 7: Keep version UNRELEASED always ─────────────────────────────
-      // Per requirements: always leave as Unreleased on Jira so team can verify
-      // Jira status must be manually changed to Released after review
+      // ── STEP 3: Parse RN Confluence page server-side ─────────────────────      let rnData = null;      const rnLinks = [...new Set([...(r.rnLinks||[]), ...(r.rnLink?[r.rnLink]:[])])].filter(Boolean);      const rnPageUrl = rnLinks[0] || "";      const pageIdM   = rnPageUrl.match(/\/pages\/(\d+)/);      if (pageIdM) {        log("Parsing RN Confluence page…");        try {          const pr = await fetch(`/api/confluence?pageId=${pageIdM[1]}`);          if (pr.ok) {            rnData = await pr.json();            log(`RN parsed — ${rnData.htmlLen} chars, ${(rnData.fields?.jiraTickets||[]).length} tickets, ${(rnData.fields?.approvedBy||[]).length} approvers`);          }        } catch(e) { results.errors.push(`RN parse: ${e.message}`); }      }      const rnFields      = rnData?.fields || {};      const allTickets    = rnFields.jiraTickets || [];      const approversFromRN = rnData ? (rnFields.approvedBy || []) : [];      // ── STEP 4: Update version — dates + description with approvers ────────      const approverNames = approversFromRN.length        ? approversFromRN        : Object.entries(r.approvals||{}).filter(([,v])=>v===true).map(([k])=>k);      const approverLine  = approverNames.length ? `Approved by: ${approverNames.join(", ")}` : "";      const fullDesc      = [r.rn, r.goal, approverLine].filter(Boolean).join(" | ").slice(0,255);      const handoverYMD   = toYMD(rnFields.dora?.handoverDate || r.releasePlanned);      const releaseDateYMD = toYMD(r.releaseActual) || toYMD(r.releasePlanned);      const updatePay = {};      if (handoverYMD)     updatePay.startDate   = handoverYMD;      if (releaseDateYMD)  updatePay.releaseDate  = releaseDateYMD;      if (fullDesc)        updatePay.description  = fullDesc;      if (Object.keys(updatePay).length) {        log("Updating version dates + description…");        await jiraFetch(`rest/api/3/version/${versionId}`, { method:"PUT", body:JSON.stringify(updatePay) });      }      // ── STEP 5: Add RN links as Related Work ──────────────────────────────      if (rnLinks.length > 0) {        log(`Adding ${rnLinks.length} RN link(s) as related work…`);        for (const [idx, lnk] of rnLinks.entries()) {          const remRes = await jiraFetch(`rest/api/3/version/${versionId}/remotelink`, {            method:"POST", body:JSON.stringify({              url:lnk, title:idx===0?(r.rn||r.summary):`${r.rn||r.summary} (${idx+1})`,              summary:r.summary, relationship:"Development",              object:{ url:lnk, title:idx===0?(r.rn||r.summary):`${r.rn||r.summary} (${idx+1})`,                icon:{url16x16:"https://www.atlassian.com/favicon.ico",title:"Release Note"},                status:{resolved:r.status==="Released",icon:{url16x16:"",title:r.status,link:""}}},              application:{type:"com.atlassian.confluence",name:"Release Notes"},            })          });          if (remRes.ok||remRes.status===404||remRes.status===201) results.related=true;          else { const t=await remRes.text().catch(()=>""); results.errors.push(`Related work: ${remRes.status} ${t.slice(0,80)}`); }        }      }      // ── STEP 6: Add tickets as Work Items ─────────────────────────────────      if (allTickets.length > 0) {        log(`Adding ${allTickets.length} work item(s)…`);        let added=0;        for (const key of allTickets) {          try {            const ir=await jiraFetch(`rest/api/3/issue/${key}?fields=fixVersions`);            if (!ir.ok) { results.errors.push(`${key}: not found`); continue; }            const id=await ir.json();            const existing=(id?.fields?.fixVersions||[]).map(v=>v.id);            if (!existing.includes(versionId)) {              const ur=await jiraFetch(`rest/api/3/issue/${key}`,{method:"PUT",body:JSON.stringify({update:{fixVersions:[{add:{id:versionId}}]}})});              if (ur.ok||ur.status===204) added++;              else { const t=await ur.text().catch(()=>""); results.errors.push(`${key}: ${ur.status} ${t.slice(0,60)}`); }            } else added++;          } catch(e) { results.errors.push(`${key}: ${e.message}`); }        }        results.tickets=allTickets; log(`Work items: ${added}/${allTickets.length}`);      }      // ── STEP 7: Assign approvers as Jira watchers ─────────────────────────      if (approverNames.length > 0) {        log(`Looking up ${approverNames.length} approver(s)…`);        for (const name of approverNames) {          try {            const sr=await jiraFetch(`rest/api/3/user/search?query=${encodeURIComponent(name)}&maxResults=5`);            if (!sr.ok) { results.errors.push(`User search ${name}: ${sr.status}`); continue; }            const users=await sr.json();            const match=Array.isArray(users)?users.find(u=>              (u.displayName||"").toLowerCase().includes(name.toLowerCase())||              (u.emailAddress||"").toLowerCase().includes(name.toLowerCase())            ):null;            if (match) {              await jiraFetch(`rest/api/3/version/${versionId}/watchers`,{method:"POST",body:JSON.stringify(match.accountId)});              results.approvers.push(name);            } else results.errors.push(`Approver "${name}" not found in Jira`);          } catch(e) { results.errors.push(`Approver ${name}: ${e.message}`); }        }      }      // ── STEP 8: Sync missing fields back to Supabase ──────────────────────      const dbUpdates={};      const dora=rnFields.dora||{}, curDora=r.dora||{};      const doraUpdate={...curDora};      let doraChanged=false;      for (const [k,v] of Object.entries(dora)) {        if (v && !curDora[k]) { doraUpdate[k]=v; doraChanged=true; }      }      if (doraChanged) dbUpdates.dora=doraUpdate;      if (approversFromRN.length>0) {        const curA={...r.approvals||{}}; let changed=false;        for (const name of approversFromRN) {          const key=Object.keys(curA).find(k=>k.toLowerCase()===name.toLowerCase());          if (key&&!curA[key]) { curA[key]=true; changed=true; }        }        if (changed) dbUpdates.approvals=curA;      }      if (Object.keys(dbUpdates).length>0) {        log("Syncing new data back to release record…");        try {          await fetch(`/api/releases?id=${r.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(dbUpdates)});          results.dbSynced=Object.keys(dbUpdates);        } catch(e) { results.errors.push(`DB sync: ${e.message}`); }      }
+      // ── STEP 9: Always Unreleased ─────────────────────────────────────────
       results.released = false;
 
-      // ── Build summary message ───────────────────────────────────────────────
+      // ── STEP 10: Sync missing fields back to Supabase DB ──────────────────
+      if (rnFields) {
+        const updates = {};
+        // Fill missing DORA fields
+        const dora = { ...(r.dora||{}) };
+        if (!dora.leadDeveloper && rnFields.dora?.leadDeveloper) dora.leadDeveloper = rnFields.dora.leadDeveloper;
+        if (!dora.application   && rnFields.dora?.application)   dora.application   = rnFields.dora.application;
+        if (!dora.services      && rnFields.dora?.services)      dora.services      = rnFields.dora.services;
+        if (!dora.handoverDate  && rnFields.dora?.handoverDate)  dora.handoverDate  = rnFields.dora.handoverDate;
+        if (JSON.stringify(dora) !== JSON.stringify(r.dora||{})) updates.dora = dora;
+        // Fill missing approvals from RN
+        if (rnFields.approvedBy?.length) {
+          const approvals = { ...(r.approvals||{}) };
+          for (const name of rnFields.approvedBy) {
+            if (approvals[name] !== true) approvals[name] = true;
+          }
+          if (JSON.stringify(approvals) !== JSON.stringify(r.approvals||{})) updates.approvals = approvals;
+        }
+        // Sync back if anything changed
+        if (Object.keys(updates).length > 0) {
+          try {
+            await fetch(`/api/releases?id=${r.id}`, {
+              method: "PUT",
+              headers: { "Content-Type":"application/json" },
+              body: JSON.stringify(updates),
+            });
+            onSyncBack({ ...r, ...updates });
+            results.dbUpdated = Object.keys(updates);
+          } catch(e) { results.errors.push(`DB sync: ${e.message}`); }
+        }
+      }
+
+            // ── Build summary message ───────────────────────────────────────────────
       const parts = [];
-      if (results.related)          parts.push(`${rnLinks.length} RN link(s)`);
-      if (results.tickets.length)   parts.push(`${results.tickets.length} ticket(s)`);
-      if (results.approvers.length) parts.push(`${results.approvers.length} approver(s)`);
-      parts.push("kept Unreleased");
+      if (results.related)              parts.push(`${rnLinks.length} RN link(s)`);
+      if (results.tickets?.length)      parts.push(`${results.tickets.length} ticket(s)`);
+      if (results.approvers?.length)    parts.push(`${results.approvers.length} approver(s)`);
+      if (results.dbUpdated?.length)    parts.push(`DB updated: ${results.dbUpdated.join(", ")}`);
+      parts.push("Unreleased");
 
       const errNote = results.errors.length ? ` (${results.errors.length} warning(s): ${results.errors.slice(0,2).join("; ")})` : "";
       setSync(r.id, {
