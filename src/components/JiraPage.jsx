@@ -837,8 +837,7 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
               </pre>
               {rnParseResult.html && (
                 <pre style={{ color: "#22c55e", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                  HTML preview:{"
-"}{rnParseResult.html}
+                  {"HTML preview:\n" + rnParseResult.html}
                 </pre>
               )}
             </details>
