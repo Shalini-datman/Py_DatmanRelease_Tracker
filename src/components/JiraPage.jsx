@@ -131,135 +131,42 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
     return res;
   };
 
-  // ── RN Page Parser ────────────────────────────────────────────────────────────
+  // ── RN Page Parser ──────────────────────────────────────────────────────────
+  // All fetching + parsing done server-side via /api/confluence
+  // so auth always works and we avoid CORS issues
   const parseRNPage = async (url) => {
     if (!url) return;
     setRnParsing(true); setRnParseResult(null);
     try {
-      // Extract page ID from URL
       const pageIdMatch = url.match(/\/pages\/(\d+)/);
-      if (!pageIdMatch) throw new Error("Could not extract page ID from URL. Expected format: .../pages/{id}/...");
+      if (!pageIdMatch) throw new Error("Could not find page ID in URL — expected .../pages/{number}/...");
       const pageId = pageIdMatch[1];
 
-      // Try multiple Confluence API formats — storage, view, export_view
-      // Some Confluence instances return empty storage but full view
-      let html = "", title = "", rawDebug = "";
-
-      // Try 1: body.storage + body.view + body.export_view all at once
-      const res = await jiraFetch(`wiki/rest/api/content/${pageId}?expand=body.storage,body.view,body.export_view,version,space`);
+      // Single call to Python serverless function — handles all auth + parsing
+      const res = await fetch(`/api/confluence?pageId=${pageId}`);
       if (!res.ok) {
         const txt = await res.text().catch(()=>"");
-        throw new Error(`Confluence fetch failed (${res.status}): ${txt.slice(0,300)}`);
+        throw new Error(`Parse failed (${res.status}): ${txt.slice(0,200)}`);
       }
       const data = await res.json();
-      title = data?.title || "";
 
-      // Pick whichever body format has content
-      const storage    = data?.body?.storage?.value     || "";
-      const view       = data?.body?.view?.value        || "";
-      const exportView = data?.body?.export_view?.value || "";
-
-      // Prefer storage (raw markup) → view (rendered) → export_view
-      html = storage || view || exportView;
-      rawDebug = JSON.stringify({
-        title,
-        storageLen:    storage.length,
-        viewLen:       view.length,
-        exportViewLen: exportView.length,
-        bodyKeys:      Object.keys(data?.body || {}),
-        topKeys:       Object.keys(data || {}),
-        storagePreview: storage.slice(0, 300),
-        viewPreview:    view.slice(0, 300),
-      }, null, 2);
-
-      // If still empty try Confluence v2 API
-      if (!html) {
-        const res2 = await jiraFetch(`wiki/api/v2/pages/${pageId}?body-format=storage`);
-        if (res2.ok) {
-          const d2 = await res2.json();
-          html = d2?.body?.storage?.value || d2?.body?.value || "";
-          rawDebug += "\n\nv2 response: " + JSON.stringify({ bodyKeys: Object.keys(d2?.body||{}), len: html.length, preview: html.slice(0,200) });
-        }
-      }
-
-      // ── Extract all fields from page ──────────────────────────────────────
-      const result = { title, pageId, url, html: html.slice(0, 800), rawDebug, fields: {} };
-
-      // 1. Jira ticket IDs
-      // Tickets always start with DN- per project convention
-      const tickets = [...new Set((html.match(/\bDN-\d+\b/g) || []))];
-      result.fields.jiraTickets = tickets;
-
-      // 2. Release date from title (e.g. "25-03-2026" or "25/03/2026")
-      const dateFromTitle = title.match(/(\d{1,2}[-/]\d{2}[-/]\d{4})/);
-      result.fields.releaseDateFromTitle = dateFromTitle ? dateFromTitle[1] : null;
-
-      // 3. Parse all table rows — extract key:value pairs
-      const tableRows = {};
-      const trMatches = html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi);
-      for (const tr of trMatches) {
-        const cells = [...tr[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)]
-          .map(m => m[1].replace(/<[^>]+>/g, "").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&nbsp;/g," ").trim())
-          .filter(Boolean);
-        if (cells.length >= 2) {
-          const key = cells[0].toLowerCase().replace(/[^a-z0-9]/g, "_");
-          tableRows[key] = cells.slice(1).join(" | ");
-        }
-      }
-      result.fields.tableData = tableRows;
-
-      // 4. Approved by — look for approval table rows
-      const approvedBy = [];
-      const approvalPatterns = [/approv/i, /sign.?off/i, /reviewed.?by/i];
-      for (const [k, v] of Object.entries(tableRows)) {
-        if (approvalPatterns.some(p => p.test(k)) || approvalPatterns.some(p => p.test(v))) {
-          // Extract names from the value — comma or newline separated
-          const names = v.split(/[,\n|]+/).map(n => n.trim()).filter(n => n.length > 1 && n.length < 40);
-          approvedBy.push(...names);
-        }
-      }
-      // Also look for "Approved by: Name" patterns in plain text
-      const approvedMatches = html.matchAll(/approved[^:]*by[^:]*:([^<\n]+)/gi);
-      for (const m of approvedMatches) {
-        const names = m[1].replace(/<[^>]+>/g,"").split(/[,|]+/).map(n=>n.trim()).filter(Boolean);
-        approvedBy.push(...names);
-      }
-      result.fields.approvedBy = [...new Set(approvedBy)];
-
-      // 5. Lead developer / DORA fields
-      const doraKeys = {
-        lead_developer: ["lead_dev","developer","lead_developer","author"],
-        application:    ["application","app","service_name"],
-        services:       ["services","microservices","components"],
-        handover_date:  ["handover","handover_date","code_freeze"],
-      };
-      for (const [field, keys] of Object.entries(doraKeys)) {
-        for (const k of keys) {
-          const found = Object.entries(tableRows).find(([key]) => key.includes(k));
-          if (found) { result.fields[field] = found[1]; break; }
-        }
-      }
-
-      // 6. Extract all headings
-      const headings = [...html.matchAll(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi)]
-        .map(m => m[1].replace(/<[^>]+>/g,"").trim()).filter(Boolean);
-      result.fields.headings = headings;
-
-      // 7. External links (test evidence, PRs etc)
-      const links = [...new Set(
-        [...html.matchAll(/href=["']([^"']+)["']/gi)]
-          .map(m => m[1])
-          .filter(l => l.startsWith("http") && !l.includes("atlassian.net/browse") && !l.includes("wiki"))
-      )].slice(0, 10);
-      result.fields.externalLinks = links;
-
-      setRnParseResult({ success: true, ...result });
+      setRnParseResult({
+        success:  true,
+        title:    data.title,
+        pageId:   data.pageId,
+        url,
+        htmlLen:  data.htmlLen,
+        htmlPreview: data.htmlPreview,
+        debug:    data.debug?.join("\n") || "",
+        fields:   data.fields || {},
+      });
     } catch (e) {
       setRnParseResult({ success: false, error: e.message });
     } finally {
       setRnParsing(false);
     }
   };
+
 
   const syncToJira = useCallback(async (r) => {
     if (!cfg.key || !cfg.base) {
@@ -746,106 +653,110 @@ export default function JiraVersionsPage({ releases, onSyncBack }) {
 
       {/* ── RN Parser tab ── */}
       {activeTab === "parser" && (
-      <div style={{ margin: "0.75rem 2rem 0", background: "#060f1a", border: `1px solid ${B.teal}44`, borderRadius: 12, padding: "1.1rem 1.25rem" }}>
-        <div style={{ color: B.teal, fontSize: "0.72rem", fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: "0.75rem" }}>
-          🔍 RN Page Parser — Paste a Confluence RN URL to see what will be extracted
-        </div>
-        <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
-          <input value={rnParseUrl} onChange={e => setRnParseUrl(e.target.value)}
-            placeholder="https://datman.atlassian.net/wiki/spaces/DN/pages/3468001291/..."
-            style={{ flex: 1, height: 30, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, color: "#fff", fontFamily: FONT, fontSize: "0.75rem", padding: "0 0.75rem", outline: "none" }}
-          />
-          <button onClick={() => parseRNPage(rnParseUrl)} disabled={rnParsing || !rnParseUrl}
-            style={{ height: 30, padding: "0 1rem", background: B.grad1, border: "none", color: "#fff", borderRadius: 7, cursor: "pointer", fontFamily: FONT, fontSize: "0.72rem", fontWeight: 700, opacity: rnParsing ? 0.6 : 1 }}>
-            {rnParsing ? "Parsing…" : "Parse RN"}
-          </button>
-        </div>
-        {rnParseResult && !rnParseResult.success && (
-          <div style={{ color: "#ef4444", fontSize: "0.75rem", padding: "0.5rem 0.75rem", background: "#2d0a0a", borderRadius: 8 }}>
-            ✗ {rnParseResult.error}
+      <div style={{ padding: "0.75rem 2rem" }}>
+        <div style={{ background: "#060f1a", border: `1px solid ${B.teal}44`, borderRadius: 12, padding: "1.1rem 1.25rem" }}>
+          <div style={{ color: B.teal, fontSize: "0.72rem", fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: "0.75rem" }}>
+            🔍 RN Page Parser
           </div>
-        )}
-        {rnParseResult?.success && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
-            {/* Title */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.2rem" }}>Page Title</div>
-              <div style={{ color: B.textPrimary, fontSize: "0.82rem", fontWeight: 500 }}>{rnParseResult.title}</div>
-            </div>
-            {/* Jira Tickets */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                Jira Tickets Found ({rnParseResult.fields.jiraTickets?.length || 0})
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                {(rnParseResult.fields.jiraTickets || []).length === 0
-                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — no DN-XXXX tickets in this page</span>
-                  : (rnParseResult.fields.jiraTickets || []).map(t => (
-                      <span key={t} style={{ background: "#0f2d52", color: "#60a5fa", border: "1px solid #1e4a8066", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{t}</span>
-                    ))}
-              </div>
-            </div>
-            {/* Approved By */}
-            <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                Approved By ({rnParseResult.fields.approvedBy?.length || 0})
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                {(rnParseResult.fields.approvedBy || []).length === 0
-                  ? <span style={{ color: B.textMuted, fontSize: "0.75rem" }}>None found — check page has an approval table/section</span>
-                  : (rnParseResult.fields.approvedBy || []).map(n => (
-                      <span key={n} style={{ background: "#22c55e18", color: "#22c55e", border: "1px solid #22c55e44", padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.72rem", fontWeight: 700 }}>{n}</span>
-                    ))}
-              </div>
-            </div>
-            {/* Table Data */}
-            {Object.keys(rnParseResult.fields.tableData || {}).length > 0 && (
-              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.5rem" }}>
-                  Table Data Extracted ({Object.keys(rnParseResult.fields.tableData).length} rows)
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.72rem" }}>
-                  {Object.entries(rnParseResult.fields.tableData).slice(0, 20).map(([k, v]) => (
-                    <tr key={k}>
-                      <td style={{ color: B.textMuted, padding: "0.2rem 0.75rem 0.2rem 0", whiteSpace: "nowrap", verticalAlign: "top", width: "35%", fontWeight: 600 }}>{k}</td>
-                      <td style={{ color: B.textPrimary, padding: "0.2rem 0", wordBreak: "break-word" }}>{v.slice(0, 200)}</td>
-                    </tr>
-                  ))}
-                </table>
-              </div>
-            )}
-            {/* Headings */}
-            {(rnParseResult.fields.headings || []).length > 0 && (
-              <div style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-                <div style={{ color: B.textMuted, fontSize: "0.62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.4rem" }}>
-                  Page Sections / Headings
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "0.35rem" }}>
-                  {(rnParseResult.fields.headings || []).map((h, i) => (
-                    <span key={i} style={{ background: B.border, color: B.textSecondary, padding: "0.15rem 0.55rem", borderRadius: 6, fontSize: "0.7rem" }}>{h}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            {/* Raw HTML preview */}
-            <details style={{ background: "#0d1f2d", borderRadius: 8, padding: "0.6rem 0.85rem" }}>
-              <summary style={{ color: B.textMuted, fontSize: "0.68rem", cursor: "pointer", fontWeight: 600 }}>
-                Debug info — HTML length: {rnParseResult.html?.length || 0} chars
-              </summary>
-              <pre style={{ color: "#4a7a96", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                {rnParseResult.rawDebug || "no debug info"}
-              </pre>
-              {rnParseResult.html && (
-                <pre style={{ color: "#22c55e", fontSize: "0.6rem", marginTop: "0.5rem", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                  {"HTML preview:\n" + rnParseResult.html}
-                </pre>
-              )}
-            </details>
+          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+            <input value={rnParseUrl} onChange={e => setRnParseUrl(e.target.value)}
+              placeholder="https://datman.atlassian.net/wiki/spaces/DN/pages/3443359745/..."
+              style={{ flex:1, height:30, background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:7, color:"#fff", fontFamily:FONT, fontSize:"0.75rem", padding:"0 0.75rem", outline:"none" }}
+            />
+            <button onClick={() => parseRNPage(rnParseUrl)} disabled={rnParsing || !rnParseUrl}
+              style={{ height:30, padding:"0 1rem", background:B.grad1, border:"none", color:"#fff", borderRadius:7, cursor:"pointer", fontFamily:FONT, fontSize:"0.72rem", fontWeight:700, opacity:rnParsing?0.6:1 }}>
+              {rnParsing ? "Parsing…" : "Parse RN"}
+            </button>
           </div>
-        )}
+          {rnParseResult && !rnParseResult.success && (
+            <div style={{ color:"#ef4444", fontSize:"0.75rem", padding:"0.6rem 0.75rem", background:"#2d0a0a", borderRadius:8 }}>
+              ✗ {rnParseResult.error}
+            </div>
+          )}
+          {rnParseResult?.success && (() => {
+            const f = rnParseResult.fields || {};
+            const SEC = ({label, count, children}) => (
+              <div style={{ background:"#0d1f2d", borderRadius:8, padding:"0.65rem 0.85rem", marginBottom:"0.5rem" }}>
+                <div style={{ color:B.textMuted, fontSize:"0.62rem", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:"0.45rem" }}>
+                  {label}{count !== undefined && <span style={{ color:count>0?B.teal:"#ef4444", marginLeft:4 }}>({count})</span>}
+                </div>
+                {children}
+              </div>
+            );
+            const Empty = ({msg}) => <span style={{ color:B.textMuted, fontSize:"0.72rem" }}>{msg}</span>;
+            return (
+              <div>
+                <SEC label="Page Title">
+                  <div style={{ color:B.textPrimary, fontSize:"0.85rem", fontWeight:500 }}>{rnParseResult.title||"—"}</div>
+                  <div style={{ color:B.textMuted, fontSize:"0.68rem", marginTop:3 }}>
+                    HTML content: {rnParseResult.htmlLen} chars
+                    {rnParseResult.htmlLen===0 && <span style={{ color:"#ef4444", marginLeft:6 }}>⚠ Empty — see debug</span>}
+                  </div>
+                </SEC>
+                <SEC label="Jira Tickets (DN-XXXX) — Work Items" count={(f.jiraTickets||[]).length}>
+                  {(f.jiraTickets||[]).length===0
+                    ? <Empty msg={rnParseResult.htmlLen===0 ? "Page content empty — check debug" : "No DN-XXXX tickets found in page"} />
+                    : <div style={{ display:"flex", flexWrap:"wrap", gap:"0.35rem" }}>
+                        {f.jiraTickets.map(t=><span key={t} style={{ background:"#0f2d52",color:"#60a5fa",border:"1px solid #1e4a8066",padding:"0.18rem 0.6rem",borderRadius:6,fontSize:"0.72rem",fontWeight:700 }}>{t}</span>)}
+                      </div>}
+                </SEC>
+                {Object.keys(f.ticketsBySection||{}).length>0 && (
+                  <SEC label="Tickets by Section">
+                    {Object.entries(f.ticketsBySection).map(([s,ts])=>(
+                      <div key={s} style={{ marginBottom:"0.4rem" }}>
+                        <div style={{ color:B.textSecondary, fontSize:"0.7rem", fontWeight:600, marginBottom:"0.2rem" }}>{s}</div>
+                        <div style={{ display:"flex", flexWrap:"wrap", gap:"0.25rem" }}>
+                          {ts.map(t=><span key={t} style={{ background:"#0f2d52",color:"#60a5fa",border:"1px solid #1e4a8066",padding:"0.1rem 0.5rem",borderRadius:6,fontSize:"0.68rem",fontWeight:700 }}>{t}</span>)}
+                        </div>
+                      </div>
+                    ))}
+                  </SEC>
+                )}
+                <SEC label="Approved By — added as Jira watchers" count={(f.approvedBy||[]).length}>
+                  {(f.approvedBy||[]).length===0
+                    ? <Empty msg="Not found — need 'Approved By' / 'Sign Off' row in table" />
+                    : <div style={{ display:"flex", flexWrap:"wrap", gap:"0.35rem" }}>
+                        {f.approvedBy.map(n=><span key={n} style={{ background:"#22c55e18",color:"#22c55e",border:"1px solid #22c55e44",padding:"0.18rem 0.6rem",borderRadius:6,fontSize:"0.72rem",fontWeight:700 }}>{n}</span>)}
+                      </div>}
+                </SEC>
+                {Object.keys(f.dora||{}).length>0 && (
+                  <SEC label="DORA Fields">
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"0.72rem" }}>
+                      {Object.entries(f.dora).map(([k,v])=>(
+                        <tr key={k}><td style={{ color:B.textMuted,padding:"0.15rem 0.75rem 0.15rem 0",width:"35%",fontWeight:600,verticalAlign:"top" }}>{k}</td><td style={{ color:B.textPrimary }}>{v}</td></tr>
+                      ))}
+                    </table>
+                  </SEC>
+                )}
+                {Object.keys(f.tableData||{}).length>0 && (
+                  <SEC label={`All Table Rows (${Object.keys(f.tableData).length})`}>
+                    <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"0.71rem" }}>
+                      {Object.entries(f.tableData).map(([k,v])=>(
+                        <tr key={k} style={{ borderBottom:`1px solid ${B.border}` }}>
+                          <td style={{ color:B.textMuted,padding:"0.18rem 0.75rem 0.18rem 0",width:"38%",fontWeight:600,verticalAlign:"top" }}>{k}</td>
+                          <td style={{ color:B.textPrimary,padding:"0.18rem 0",wordBreak:"break-word" }}>{(v||"").slice(0,200)}</td>
+                        </tr>
+                      ))}
+                    </table>
+                  </SEC>
+                )}
+                {(f.headings||[]).length>0 && (
+                  <SEC label="Page Sections">
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:"0.3rem" }}>
+                      {f.headings.map((h,i)=><span key={i} style={{ background:B.border,color:B.textSecondary,padding:"0.15rem 0.55rem",borderRadius:6,fontSize:"0.7rem" }}>{h}</span>)}
+                    </div>
+                  </SEC>
+                )}
+                <details style={{ background:"#0d1f2d", borderRadius:8, padding:"0.65rem 0.85rem" }}>
+                  <summary style={{ color:B.textMuted, fontSize:"0.68rem", cursor:"pointer", fontWeight:600 }}>Debug info</summary>
+                  <pre style={{ color:"#4a7a96", fontSize:"0.6rem", marginTop:"0.5rem", whiteSpace:"pre-wrap", wordBreak:"break-all" }}>{rnParseResult.debug}</pre>
+                  {rnParseResult.htmlPreview && <pre style={{ color:"#22c55e", fontSize:"0.6rem", marginTop:"0.5rem", whiteSpace:"pre-wrap", wordBreak:"break-all" }}>{"HTML preview:\n"+rnParseResult.htmlPreview}</pre>}
+                </details>
+              </div>
+            );
+          })()}
+        </div>
       </div>
-
-
       )}
 
     </div>
